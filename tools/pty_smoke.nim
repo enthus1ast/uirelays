@@ -18,6 +18,9 @@
 ##   --wait=SEC      how long to drive it      (default 3.0)
 ##   --send=MS:BYTES input at MS milliseconds; `\e`, `\n`, `\r`, `\t`, `\xHH`
 ##                   and `\\` are translated
+##   --resize=MS:COLSxROWS
+##                   an ioctl(TIOCSWINSZ) at MS, which makes the kernel send
+##                   SIGWINCH to the program (exercises the resize path)
 ##   --expect=TEXT   fail unless TEXT is somewhere on the reconstructed screen
 ##   --dump          print the reconstructed screen
 ##
@@ -40,10 +43,17 @@ type
   ScriptedInput = object
     atMs*: int
     bytes*: string
+  ScriptedResize = object
+    atMs*: int
+    cols*, rows*: int
 
 proc openpty(amaster, aslave: ptr cint; name: cstring;
              termp, winp: pointer): cint {.importc, header: "<pty.h>".}
 proc login_tty(fd: cint): cint {.importc, header: "<utmp.h>".}
+proc ioctl(fd: cint; request: culong; arg: pointer): cint
+  {.importc, header: "<sys/ioctl.h>", varargs.}
+
+const TIOCSWINSZ = culong(0x5414)
 
 const HexDigits = {'0' .. '9', 'a' .. 'f', 'A' .. 'F'}
 
@@ -126,7 +136,8 @@ proc toCStringArray(args: seq[string]): cstringArray =
 
 proc usage() =
   echo "usage: pty_smoke <program> [args...] [--cols=N] [--rows=N] [--wait=SEC]"
-  echo "                 [--send=MS:BYTES]... [--expect=TEXT]... [--dump]"
+  echo "                 [--send=MS:BYTES]... [--resize=MS:COLSxROWS]..."
+  echo "                 [--expect=TEXT]... [--dump]"
 
 proc main =
   var cols = 80
@@ -134,6 +145,7 @@ proc main =
   var waitSec = 3.0
   var dump = false
   var sends: seq[ScriptedInput] = @[]
+  var resizes: seq[ScriptedResize] = @[]
   var expects: seq[string] = @[]
   var cmd: seq[string] = @[]
 
@@ -150,6 +162,14 @@ proc main =
         if colon < 0: quit "--send needs MS:BYTES, got: " & val
         sends.add ScriptedInput(atMs: parseInt(val[0 ..< colon]),
                                 bytes: unescape(val[colon + 1 .. ^1]))
+      of "resize", "z":
+        let colon = val.find(':')
+        let x = val.find('x')
+        if colon < 0 or x < 0 or x < colon:
+          quit "--resize needs MS:COLSxROWS, got: " & val
+        resizes.add ScriptedResize(atMs: parseInt(val[0 ..< colon]),
+                                   cols: parseInt(val[colon + 1 ..< x]),
+                                   rows: parseInt(val[x + 1 .. ^1]))
       of "expect", "e": expects.add val
       of "dump", "d": dump = true
       of "help", "h": usage(); return
@@ -160,6 +180,7 @@ proc main =
     usage()
     quit 1
   sends.sort(proc (a, b: ScriptedInput): int = cmp(a.atMs, b.atMs))
+  resizes.sort(proc (a, b: ScriptedResize): int = cmp(a.atMs, b.atMs))
 
   var ws = Winsize(ws_row: rows.cushort, ws_col: cols.cushort)
   var master, slave: cint
@@ -178,6 +199,9 @@ proc main =
 
   var outp = ""
   var idx = 0
+  var ridx = 0
+  var finalCols = cols
+  var finalRows = rows
   let start = epochTime()
   var alive = true
   while alive and epochTime() - start < waitSec:
@@ -197,15 +221,24 @@ proc main =
       if msg.len > 0:
         discard write(master, unsafeAddr msg[0], msg.len)
       inc idx
+    while ridx < resizes.len and t * 1000.0 >= resizes[ridx].atMs.float:
+      var ws = Winsize(ws_row: resizes[ridx].rows.cushort,
+                       ws_col: resizes[ridx].cols.cushort)
+      ## TIOCSWINSZ on the master makes the kernel signal SIGWINCH to the
+      ## program's process group, exactly like a real terminal window resizing.
+      discard ioctl(master, TIOCSWINSZ, addr ws)
+      finalCols = resizes[ridx].cols
+      finalRows = resizes[ridx].rows
+      inc ridx
 
   if alive:
     discard kill(pid, SIGKILL)
   var status: cint
   discard waitpid(pid, status, 0)
 
-  let grid = reconstruct(outp, cols, rows)
+  let grid = reconstruct(outp, finalCols, finalRows)
   if dump:
-    echo "=== reconstructed screen (", cols, "x", rows, ") ==="
+    echo "=== reconstructed screen (", finalCols, "x", finalRows, ") ==="
     for r in 0 ..< grid.len:
       echo align($r, 2), "|", grid[r], "|"
 
