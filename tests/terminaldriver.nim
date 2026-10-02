@@ -166,6 +166,36 @@ proc firstEvent(s: string): Event =
   feedStr(s)
   discard pollEvent(result)
 
+proc clickTests =
+  echo "click counts:"
+  var e: Event
+
+  ## Three presses in the same cell in quick succession: 1, 2, 3.
+  e = firstEvent("\e[<0;5;5M")
+  check("press 1 -> clicks = 1", e.kind == MouseDownEvent and e.clicks == 1)
+  e = firstEvent("\e[<0;5;5M")
+  check("press 2 -> double click", e.kind == MouseDownEvent and e.clicks == 2)
+  e = firstEvent("\e[<0;5;5M")
+  check("press 3 -> triple click", e.kind == MouseDownEvent and e.clicks == 3)
+
+  ## A press well away from the last one starts a new run.
+  e = firstEvent("\e[<0;30;20M")
+  check("far press -> clicks = 1", e.kind == MouseDownEvent and e.clicks == 1)
+
+  ## A different button in the same cell also starts a new run.
+  e = firstEvent("\e[<2;30;20M")
+  check("other button -> clicks = 1",
+    e.kind == MouseDownEvent and e.button == RightButton and e.clicks == 1)
+
+  ## The 500 ms window is wall-clock: a real pause resets the run.
+  e = firstEvent("\e[<0;1;1M")
+  check("press after a move -> clicks = 1", e.clicks == 1)
+  e = firstEvent("\e[<0;1;1M")
+  check("quick repeat -> clicks = 2", e.clicks == 2)
+  os.sleep(600)
+  e = firstEvent("\e[<0;1;1M")
+  check("after a 600 ms pause -> clicks = 1", e.clicks == 1)
+
 proc mouseTests =
   echo "sgr mouse:"
   var e: Event
@@ -261,12 +291,101 @@ proc unicodeTests =
   discard pollEvent(e)
 
 # ---------------------------------------------------------------------------
+# Ctrl combinations and CSI modifier parameters.
+# ---------------------------------------------------------------------------
+proc keyModTests =
+  echo "key modifiers:"
+  var e = Event()
+
+  ## Ctrl+A is byte 0x01, reported as a key with Ctrl rather than a raw control.
+  feedBytes(@[0x01'u8])
+  check("Ctrl+A is KeyA with Ctrl",
+    pollEvent(e) and e.kind == KeyDownEvent and e.key == KeyA and
+    CtrlPressed in e.mods)
+  check("Ctrl+A also reports the KeyUp",
+    pollEvent(e) and e.kind == KeyUpEvent and e.key == KeyA and
+    CtrlPressed in e.mods)
+
+  ## Ctrl+Z is 0x1A.
+  feedBytes(@[0x1A'u8])
+  check("Ctrl+Z is KeyZ with Ctrl",
+    pollEvent(e) and e.kind == KeyDownEvent and e.key == KeyZ and
+    CtrlPressed in e.mods)
+  discard pollEvent(e)
+
+  ## Ctrl+Space (NUL), and Ctrl+\ (0x1C), which has no letter to name.
+  feedBytes(@[0x00'u8])
+  check("Ctrl+Space is KeySpace with Ctrl",
+    pollEvent(e) and e.key == KeySpace and CtrlPressed in e.mods)
+  discard pollEvent(e)
+  feedBytes(@[0x1C'u8])
+  check("Ctrl+\\ is KeyNone with Ctrl, not a wrong key",
+    pollEvent(e) and e.key == KeyNone and CtrlPressed in e.mods)
+  discard pollEvent(e)
+
+  ## xterm modifier parameters: ESC [ 1 ; 5 A is Ctrl+Up.
+  feedBytes(@[0x1B'u8, ord('[').uint8, ord('1').uint8, ord(';').uint8,
+              ord('5').uint8, ord('A').uint8])
+  check("ESC[1;5A is Ctrl+Up",
+    pollEvent(e) and e.kind == KeyDownEvent and e.key == KeyUp and
+    CtrlPressed in e.mods)
+  discard pollEvent(e)
+
+  ## ESC [ 3 ; 2 ~ is Shift+Delete (and not Ctrl).
+  feedBytes(@[0x1B'u8, ord('[').uint8, ord('3').uint8, ord(';').uint8,
+              ord('2').uint8, ord('~').uint8])
+  check("ESC[3;2~ is Shift+Delete",
+    pollEvent(e) and e.kind == KeyDownEvent and e.key == KeyDelete and
+    ShiftPressed in e.mods and CtrlPressed notin e.mods)
+  discard pollEvent(e)
+
+  ## Shift+Tab has its own sequence.
+  feedBytes(@[0x1B'u8, ord('[').uint8, ord('Z').uint8])
+  check("ESC[Z is Shift+Tab",
+    pollEvent(e) and e.kind == KeyDownEvent and e.key == KeyTab and
+    ShiftPressed in e.mods)
+  discard pollEvent(e)
+
+# ---------------------------------------------------------------------------
+# The relays that used to be stubs: clipboard write, cursor shape, focus.
+# ---------------------------------------------------------------------------
+proc relayTests =
+  echo "relays:"
+
+  ## Clipboard write is OSC 52 with the base64 of the text.
+  captured.setLen 0
+  putClipboardText("hi")
+  check("putClipboardText emits OSC 52", captured.contains("\e]52;c;aGk=\a"))
+  check("getClipboardText is empty (no read round trip)",
+    getClipboardText() == "")
+
+  ## Cursor shape is DECSCUSR.
+  captured.setLen 0
+  setCursor(curIbeam)
+  check("setCursor(curIbeam) emits a steady bar", captured.contains("\e[6 q"))
+  captured.setLen 0
+  setCursor(curDefault)
+  check("setCursor(curDefault) emits a steady block", captured.contains("\e[2 q"))
+
+  ## Focus in/out (mode 1004) turn into the focus events.
+  var e = Event()
+  feedBytes(@[0x1B'u8, ord('[').uint8, ord('I').uint8])
+  check("ESC[I -> WindowFocusGainedEvent",
+    pollEvent(e) and e.kind == WindowFocusGainedEvent)
+  feedBytes(@[0x1B'u8, ord('[').uint8, ord('O').uint8])
+  check("ESC[O -> WindowFocusLostEvent",
+    pollEvent(e) and e.kind == WindowFocusLostEvent)
+
+# ---------------------------------------------------------------------------
 proc main() =
   colourTests()
   utf8Tests()
   renderTests()
   inputTests()
   unicodeTests()
+  keyModTests()
+  relayTests()
+  clickTests()
   mouseTests()
 
   echo()

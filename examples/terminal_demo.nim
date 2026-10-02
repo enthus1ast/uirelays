@@ -18,6 +18,7 @@
 ##   c          clear the event log
 ##   Esc/Ctrl+Q quit
 
+import std/strutils
 import uirelays
 
 const
@@ -32,6 +33,19 @@ type
 proc centered(r: Rect; label: string): tuple[x, y: int] =
   ## Where a one-row label sits so it looks centred in the rectangle.
   (r.x + max(0, (r.w - label.len) div 2), r.y + r.h div 2)
+
+proc keyLabel(e: Event): string =
+  ## `KeyPageUp` -> `PageUp`, prefixed with the modifiers that came with it:
+  ## `Ctrl+A`, `Shift+Delete`, `Alt+Up`, ...
+  var parts: seq[string] = @[]
+  if ShiftPressed in e.mods: parts.add "Shift"
+  if CtrlPressed in e.mods: parts.add "Ctrl"
+  if AltPressed in e.mods: parts.add "Alt"
+  if GuiPressed in e.mods: parts.add "Meta"
+  var name = $e.key
+  if name.len > 3 and name[0 .. 2] == "Key":
+    name = name[3 .. ^1]
+  (if parts.len > 0: parts.join("+") & "+" else: "") & name
 
 proc drawArrow(x, y: int; body, tip: Color) =
   ## A blocky arrow that still reads as a pointer in a character grid.
@@ -132,6 +146,10 @@ proc main =
       of WindowMetricsEvent, WindowResizeEvent:
         width = e.x
         height = e.y
+      of WindowFocusGainedEvent:
+        addLog(log, "focus gained")
+      of WindowFocusLostEvent:
+        addLog(log, "focus lost")
       of MouseMoveEvent:
         mouseX = e.x
         mouseY = e.y
@@ -141,10 +159,14 @@ proc main =
         mouseY = e.y
         mouseSeen = true
         pressed = buttonAt(e.x, e.y)
+        var tag = ""
+        case e.clicks
+        of 2: tag = " double-click"
+        of 3: tag = " triple-click"
+        else: discard
+        addLog(log, "MouseDown " & $e.button & tag & " @ " & $e.x & "," & $e.y)
         if e.button == LeftButton and pressed >= 0:
           activate(pressed)
-        else:
-          addLog(log, "MouseDown " & $e.button & " @ " & $e.x & "," & $e.y)
       of MouseUpEvent:
         mouseX = e.x
         mouseY = e.y
@@ -161,14 +183,22 @@ proc main =
           running = false
         of KeyQ:
           if CtrlPressed in e.mods: running = false
-          else: addLog(log, "Key " & $e.key)
+          else: addLog(log, "Key " & keyLabel(e))
         of Key1 .. Key4:
           activate(ord(e.key) - ord(Key1))
         of KeyC:
           log.setLen 0
           addLog(log, "Log cleared")
+        of KeyY:
+          if CtrlPressed in e.mods:
+            var copied = ""
+            for cp in typed: copied.add cp
+            putClipboardText(copied)
+            addLog(log, "Copied " & $copied.len & " bytes to clipboard")
+          else:
+            addLog(log, "Key " & keyLabel(e))
         else:
-          addLog(log, "Key " & $e.key)
+          addLog(log, "Key " & keyLabel(e))
       of TextInputEvent:
         ## One codepoint per event, already UTF-8. Keep the last 24 as whole
         ## strings so a multi-byte character is never cut in half.
@@ -228,7 +258,7 @@ proc main =
 
     # event log
     let helpY = height - 1
-    let logH = max(3, min(10, height - 10))
+    let logH = max(3, min(16, height - 10))
     let logY = max(btnY + btnH + 3, helpY - logH)
     if logY < helpY:
       let rh = helpY - logY
@@ -246,7 +276,8 @@ proc main =
 
     # help line
     discard drawText(font, margin, helpY,
-                     "1-4 buttons   c clear   Esc or Ctrl+Q quit", muted, bg)
+                     "1-4 buttons  c clear  Ctrl/Shift/Alt logged  Ctrl+Q quit",
+                     muted, bg)
 
     # the virtual pointer, last so it is always on top
     if mouseSeen:

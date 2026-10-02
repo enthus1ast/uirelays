@@ -306,9 +306,17 @@ proc drawFrame*(r: Rect; color: Color; width = 1) =
 proc drawLine*(x1, y1, x2, y2: int; color: Color) =
   drawRelays.drawLine(x1, y1, x2, y2, color)
 proc drawPoint*(x, y: int; color: Color) = drawRelays.drawPoint(x, y, color)
-proc loadImage*(path: string): Image = drawRelays.loadImage(path)
-proc freeImage*(img: Image) = drawRelays.freeImage(img)
-proc drawImage*(img: Image; src, dst: Rect) = drawRelays.drawImage(img, src, dst)
+proc loadImage*(path: string): Image =
+  ## `Image(0)` from a driver that does not offer images, the same handle it
+  ## gives for a file it could not open.
+  if drawRelays.loadImage != nil: drawRelays.loadImage(path)
+  else: Image(0)
+proc freeImage*(img: Image) =
+  if drawRelays.freeImage != nil: drawRelays.freeImage(img)
+proc drawImage*(img: Image; src, dst: Rect) =
+  ## Silently does nothing for a driver with no image relay, so an app that
+  ## guards on `imageSize` can fall back to drawing instead.
+  if drawRelays.drawImage != nil: drawRelays.drawImage(img, src, dst)
 proc imageSize*(img: Image): tuple[w, h: int] =
   ## `(0, 0)` from a driver that does not offer it. See the relay.
   if drawRelays.imageSize != nil: drawRelays.imageSize(img)

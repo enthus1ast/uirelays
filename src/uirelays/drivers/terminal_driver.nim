@@ -25,9 +25,10 @@ import uirelays/[coords, screen, input]
 import posix/termios
 import posix/posix
 import std/terminal   # hideCursor, showCursor, setCursorPos
-import std/times       # cpuTime
+import std/times       # cpuTime, epochTime
 import std/os          # getEnv
 import std/strutils    # contains
+import std/base64      # clipboard OSC 52
 
 ## POSIX signal numbers and the "default handler" sentinel. `posix/posix` does
 ## not reliably export them (only the generic ANSI-C ones, when at all), and the
@@ -93,12 +94,12 @@ var
   gShutdown = false             ## SIGINT/SIGTERM fired; a Quit is pending
   sigFd: array[0 .. 1, cint] = [-1.cint, -1.cint]  ## self-pipe for wakeups
   sigByte: uint8 = 0            ## the byte the signal handlers write
-  curMods: set[Modifier]
   escAccum: string              ## an escape sequence cut off mid-way, held
   utf8State: Utf8Decoder        ## a UTF-8 codepoint cut off mid-way, held
   eventQueue: seq[Event]
   lastClickTick = 0             ## ms of the previous press, for click runs
   lastClickX, lastClickY = 0
+  lastClickButton = LeftButton
   clickCount = 1
   outSink: proc (s: string) {.nimcall.}
 
@@ -499,12 +500,32 @@ proc restoreState*() =
   if clipStack.len > 0:
     clip = clipStack.pop
 proc setCursor*(c: CursorKind) =
-  ## A terminal has no shaped cursor to show; hide the text cursor while drawing
-  ## and let the app restore it via `hideCursor`/`showCursor` if it wants one.
-  if c == curDefault or c == curIbeam:
-    showCursor()
-  else:
-    hideCursor()
+  ## A terminal has no shaped cursor to hand out, but DECSCUSR can choose
+  ## between a block, a bar and an underline. Visibility is the frame's job: it
+  ## hides the cursor while drawing and shows it again in `refresh`.
+  let ps =
+    case c
+    of curIbeam: 6              # steady bar
+    of curDefault, curArrow: 2  # steady block
+    else: 1                     # blinking block
+  outSink("\e[" & $ps & " q")
+  if tty:
+    if c == curDefault or c == curIbeam:
+      showCursor()
+    else:
+      hideCursor()
+
+proc clipboardWrite(text: string) =
+  ## OSC 52: ask the terminal to put `text` on the system clipboard. Best
+  ## effort -- terminals commonly gate this behind a setting, and some ignore
+  ## it entirely, but it is the only clipboard a terminal app can reach.
+  outSink("\e]52;c;" & encode(text) & "\a")
+
+proc clipboardRead(): string =
+  ## Reading needs an OSC 52 query and the terminal's reply parsed off stdin,
+  ## a round trip this driver does not do. Empty is "nothing", which is also
+  ## what a terminal that refuses the query would answer.
+  ""
 proc setWindowTitle*(title: string) =
   ## Best effort: an OSC 0 title. Ignored by terminals that do not honour it.
   if tty:
@@ -622,19 +643,24 @@ proc sgrMouseBtn(b: int): MouseButton =
   of 2: RightButton
   else: LeftButton
 
-proc nextClickCount(x, y: int): int =
-  ## A press within 500 ms and 4 cells of the previous one continues a click
-  ## run (double/triple click), the same rule the X11 and WinAPI drivers use.
-  ## The terminal reports no click count of its own, so it is derived here.
-  let now = getTicks()
+proc nextClickCount(x, y: int; button: MouseButton): int =
+  ## A press within 500 ms, in the same cell neighbourhood, and on the same
+  ## button continues a click run (double/triple click), the rule the X11 and
+  ## WinAPI drivers apply. The terminal reports no click count, so it is
+  ## derived here. Wall-clock time is used deliberately: `getTicks` is CPU
+  ## time, and an app idling in `select` accrues almost none, so under the old
+  ## code two clicks minutes apart still looked simultaneous.
+  let now = int(epochTime() * 1000)
   if now - lastClickTick < 500 and
-     abs(x - lastClickX) < 4 and abs(y - lastClickY) < 4:
+     abs(x - lastClickX) < 4 and abs(y - lastClickY) < 4 and
+     button == lastClickButton:
     inc clickCount
   else:
     clickCount = 1
   lastClickTick = now
   lastClickX = x
   lastClickY = y
+  lastClickButton = button
   result = clickCount
 
 proc emitSGRMouse(seq: openArray[uint8]) =
@@ -696,23 +722,42 @@ proc emitSGRMouse(seq: openArray[uint8]) =
   elif move:
     eventQueue.add Event(kind: MouseMoveEvent, x: mx, y: my, mods: mods)
   else:
+    let btn = sgrMouseBtn(btnbits)
     eventQueue.add Event(kind: MouseDownEvent, x: mx, y: my,
-                         button: sgrMouseBtn(btnbits), mods: mods,
-                         clicks: nextClickCount(mx, my))
+                         button: btn, mods: mods,
+                         clicks: nextClickCount(mx, my, btn))
+
+proc modsFromParam(p: int): set[Modifier] =
+  ## xterm's modifier parameter in a CSI sequence: 1 plus a bitmask, 1=Shift,
+  ## 2=Alt, 4=Ctrl, 8=Meta. So `ESC[1;5A` is Ctrl+Up and `ESC[3;2~` is
+  ## Shift+Delete.
+  if p <= 1: return {}
+  let m = p - 1
+  if (m and 1) != 0: result.incl ShiftPressed
+  if (m and 2) != 0: result.incl AltPressed
+  if (m and 4) != 0: result.incl CtrlPressed
+  if (m and 8) != 0: result.incl GuiPressed
+
+proc emitKeyPair(code: KeyCode; mods: set[Modifier]) =
+  ## A key press is reported as a down/up pair, so an app that watches only
+  ## KeyDown still sees exactly one edge.
+  eventQueue.add mkKey(code, mods, true)
+  eventQueue.add mkKey(code, mods, false)
 
 proc emitSS3(fn: uint8) =
-  ## `\eO <fn>`: the application-cursor SS3 arrows and function keys.
+  ## `\eO <fn>`: the application-cursor SS3 arrows and function keys. SS3 has
+  ## no modifier parameter, so these are always unmodified.
   case fn
-  of ord('A'): eventQueue.add mkKey(KeyUp, curMods, true); eventQueue.add mkKey(KeyUp, curMods, false)
-  of ord('B'): eventQueue.add mkKey(KeyDown, curMods, true); eventQueue.add mkKey(KeyDown, curMods, false)
-  of ord('C'): eventQueue.add mkKey(KeyRight, curMods, true); eventQueue.add mkKey(KeyRight, curMods, false)
-  of ord('D'): eventQueue.add mkKey(KeyLeft, curMods, true); eventQueue.add mkKey(KeyLeft, curMods, false)
-  of ord('H'): eventQueue.add mkKey(KeyHome, curMods, true); eventQueue.add mkKey(KeyHome, curMods, false)
-  of ord('F'): eventQueue.add mkKey(KeyEnd, curMods, true); eventQueue.add mkKey(KeyEnd, curMods, false)
-  of ord('P'): eventQueue.add mkKey(KeyF1, curMods, true); eventQueue.add mkKey(KeyF1, curMods, false)
-  of ord('Q'): eventQueue.add mkKey(KeyF2, curMods, true); eventQueue.add mkKey(KeyF2, curMods, false)
-  of ord('R'): eventQueue.add mkKey(KeyF3, curMods, true); eventQueue.add mkKey(KeyF3, curMods, false)
-  of ord('S'): eventQueue.add mkKey(KeyF4, curMods, true); eventQueue.add mkKey(KeyF4, curMods, false)
+  of ord('A'): emitKeyPair(KeyUp, {})
+  of ord('B'): emitKeyPair(KeyDown, {})
+  of ord('C'): emitKeyPair(KeyRight, {})
+  of ord('D'): emitKeyPair(KeyLeft, {})
+  of ord('H'): emitKeyPair(KeyHome, {})
+  of ord('F'): emitKeyPair(KeyEnd, {})
+  of ord('P'): emitKeyPair(KeyF1, {})
+  of ord('Q'): emitKeyPair(KeyF2, {})
+  of ord('R'): emitKeyPair(KeyF3, {})
+  of ord('S'): emitKeyPair(KeyF4, {})
   else: discard
 
 proc emitCSI(seq: openArray[uint8]) =
@@ -735,35 +780,45 @@ proc emitCSI(seq: openArray[uint8]) =
       n = -1
   if n >= 0: params.add n
   let p0 = if params.len > 0: params[0] else: 0
+  ## The second parameter, when present, is the modifier (modsFromParam); it
+  ## decorates the arrows, Home/End, Delete and the F-keys.
+  let mods = if params.len > 1: modsFromParam(params[1]) else: {}
   case final
-  of ord('A'): eventQueue.add mkKey(KeyUp, curMods, true); eventQueue.add mkKey(KeyUp, curMods, false)
-  of ord('B'): eventQueue.add mkKey(KeyDown, curMods, true); eventQueue.add mkKey(KeyDown, curMods, false)
-  of ord('C'): eventQueue.add mkKey(KeyRight, curMods, true); eventQueue.add mkKey(KeyRight, curMods, false)
-  of ord('D'): eventQueue.add mkKey(KeyLeft, curMods, true); eventQueue.add mkKey(KeyLeft, curMods, false)
+  of ord('A'): emitKeyPair(KeyUp, mods)
+  of ord('B'): emitKeyPair(KeyDown, mods)
+  of ord('C'): emitKeyPair(KeyRight, mods)
+  of ord('D'): emitKeyPair(KeyLeft, mods)
   of ord('H'), ord('f'):
-    if p0 in {0, 1}:
-      eventQueue.add mkKey(KeyHome, curMods, true); eventQueue.add mkKey(KeyHome, curMods, false)
+    if p0 in {0, 1}: emitKeyPair(KeyHome, mods)
+  of ord('Z'):
+    ## Shift+Tab is its own sequence, with no parameter to carry the modifier.
+    emitKeyPair(KeyTab, {ShiftPressed})
   of ord('~'):
     case p0
-    of 1, 7: eventQueue.add mkKey(KeyHome, curMods, true); eventQueue.add mkKey(KeyHome, curMods, false)
-    of 2: eventQueue.add mkKey(KeyInsert, curMods, true); eventQueue.add mkKey(KeyInsert, curMods, false)
-    of 3: eventQueue.add mkKey(KeyDelete, curMods, true); eventQueue.add mkKey(KeyDelete, curMods, false)
-    of 4, 8: eventQueue.add mkKey(KeyEnd, curMods, true); eventQueue.add mkKey(KeyEnd, curMods, false)
-    of 5: eventQueue.add mkKey(KeyPageUp, curMods, true); eventQueue.add mkKey(KeyPageUp, curMods, false)
-    of 6: eventQueue.add mkKey(KeyPageDown, curMods, true); eventQueue.add mkKey(KeyPageDown, curMods, false)
-    of 11: eventQueue.add mkKey(KeyF1, curMods, true); eventQueue.add mkKey(KeyF1, curMods, false)
-    of 12: eventQueue.add mkKey(KeyF2, curMods, true); eventQueue.add mkKey(KeyF2, curMods, false)
-    of 13: eventQueue.add mkKey(KeyF3, curMods, true); eventQueue.add mkKey(KeyF3, curMods, false)
-    of 14: eventQueue.add mkKey(KeyF4, curMods, true); eventQueue.add mkKey(KeyF4, curMods, false)
-    of 15: eventQueue.add mkKey(KeyF5, curMods, true); eventQueue.add mkKey(KeyF5, curMods, false)
-    of 16: eventQueue.add mkKey(KeyF6, curMods, true); eventQueue.add mkKey(KeyF6, curMods, false)
-    of 17: eventQueue.add mkKey(KeyF7, curMods, true); eventQueue.add mkKey(KeyF7, curMods, false)
-    of 18: eventQueue.add mkKey(KeyF8, curMods, true); eventQueue.add mkKey(KeyF8, curMods, false)
-    of 19: eventQueue.add mkKey(KeyF9, curMods, true); eventQueue.add mkKey(KeyF9, curMods, false)
-    of 20: eventQueue.add mkKey(KeyF10, curMods, true); eventQueue.add mkKey(KeyF10, curMods, false)
-    of 21: eventQueue.add mkKey(KeyF11, curMods, true); eventQueue.add mkKey(KeyF11, curMods, false)
-    of 22: eventQueue.add mkKey(KeyF12, curMods, true); eventQueue.add mkKey(KeyF12, curMods, false)
+    of 1, 7: emitKeyPair(KeyHome, mods)
+    of 2: emitKeyPair(KeyInsert, mods)
+    of 3: emitKeyPair(KeyDelete, mods)
+    of 4, 8: emitKeyPair(KeyEnd, mods)
+    of 5: emitKeyPair(KeyPageUp, mods)
+    of 6: emitKeyPair(KeyPageDown, mods)
+    of 11: emitKeyPair(KeyF1, mods)
+    of 12: emitKeyPair(KeyF2, mods)
+    of 13: emitKeyPair(KeyF3, mods)
+    of 14: emitKeyPair(KeyF4, mods)
+    of 15: emitKeyPair(KeyF5, mods)
+    of 16: emitKeyPair(KeyF6, mods)
+    of 17: emitKeyPair(KeyF7, mods)
+    of 18: emitKeyPair(KeyF8, mods)
+    of 19: emitKeyPair(KeyF9, mods)
+    of 20: emitKeyPair(KeyF10, mods)
+    of 21: emitKeyPair(KeyF11, mods)
+    of 22: emitKeyPair(KeyF12, mods)
     else: discard
+  of ord('I'):
+    ## Focus in/out, when mode 1004 is enabled. They carry no payload.
+    eventQueue.add Event(kind: WindowFocusGainedEvent)
+  of ord('O'):
+    eventQueue.add Event(kind: WindowFocusLostEvent)
   of ord('m'), ord('d'), ord('S'), ord('T'):
     ## SGR attributes, cursor-position, page-scroll: nothing to report.
     discard
@@ -857,11 +912,15 @@ proc feedBytes*(bytes: openArray[uint8]) =
           eventQueue.add mkKey(k, {}, true); eventQueue.add mkKey(k, {}, false)
         eventQueue.add newTextInput(b.uint32)
       else:
-        ## 1..26 minus the control keys above: Ctrl + <letter>.
-        let k = KeyCode(ord(KeyA) + (b.int - 1))
-        curMods = {CtrlPressed}
-        eventQueue.add mkKey(k, curMods, true); eventQueue.add mkKey(k, curMods, false)
-        curMods = {}
+        ## The remaining C0 controls are Ctrl combinations: 1..26 are Ctrl+A ..
+        ## Ctrl+Z, 0 is Ctrl+Space. Ctrl+\, Ctrl+] and friends have no KeyCode,
+        ## so they carry KeyNone with Ctrl rather than a wrong key.
+        var k = KeyNone
+        if b.int == 0:
+          k = KeySpace
+        elif b.int >= 1 and b.int <= 26:
+          k = KeyCode(ord(KeyA) + (b.int - 1))
+        emitKeyPair(k, {CtrlPressed})
       inc i
     of drCodepoint:
       eventQueue.add newTextInput(val)
@@ -1036,12 +1095,13 @@ proc enterTerminal() =
   installSignals()
   nonblock(true)
   stdout.write "\e[?1049h"   # alternate screen buffer
-  stdout.write "\e[?1003h"   # (Aktiviert Klicks UND alle Mausbewegungen / Mouse Tracking)
-  stdout.write "\e[?1006h"   # SGR mouse
+  stdout.write "\e[?1003h"   # mouse: clicks and all motion
+  stdout.write "\e[?1006h"   # mouse: SGR encoding
+  stdout.write "\e[?1004h"   # focus in/out reports (CSI I / CSI O)
   stdout.flushFile()
   hideCursor()
 proc leaveTerminal() =
-  stdout.write "\e[?1003l\e[?1006l\e[?1049l\e[0m" # TODO auf mehrere zeilen aufteilen zum besseren lesen
+  stdout.write "\e[?1004l\e[?1003l\e[?1006l\e[?1049l\e[0m"
   stdout.flushFile()
   showCursor()
   nonblock(false)
@@ -1057,7 +1117,6 @@ proc initTerminalDriver*() =
   ## Install the relays. The real terminal setup happens in `createWindow`, so
   ## importing this module touches nothing -- safe even when the driver is
   ## compiled in but never used.
-  curMods = {}
   eventQueue.setLen 0
   clipStack.setLen 0
   captured.setLen 0
@@ -1082,7 +1141,9 @@ proc initTerminalDriver*() =
   inputRelays = InputRelays(
     pollEvent: pollEvent, waitEvent: waitEvent,
     getTicks: getTicks, sleep: sleep, shutdown: shutdown)
-  ## clipboardRelays keeps its no-op default (no xterm bracketed paste in v1).
+  ## OSC 52 for writes; reads are not attempted (see `clipboardRead`).
+  clipboardRelays = ClipboardRelays(getText: clipboardRead,
+                                    putText: clipboardWrite)
 
   gPollEventImpl = proc (e: var Event; flags: set[InputFlag]): bool {.nimcall.} =
     if eventQueue.len > 0:

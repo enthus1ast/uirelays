@@ -22,6 +22,10 @@
 ##                   an ioctl(TIOCSWINSZ) at MS, which makes the kernel send
 ##                   SIGWINCH to the program (exercises the resize path)
 ##   --expect=TEXT   fail unless TEXT is somewhere on the reconstructed screen
+##   --expect-raw=BYTES
+##                   fail unless BYTES (escapes translated) appear in the raw
+##                   output -- for cursor/mode/clipboard escapes the screen
+##                   model does not show
 ##   --expect-exit   fail unless the program exited before `--wait` (i.e. it
 ##                   handled a quit/Ctrl-C rather than being killed)
 ##   --dump          print the reconstructed screen
@@ -176,6 +180,7 @@ proc main =
   var sends: seq[ScriptedInput] = @[]
   var resizes: seq[ScriptedResize] = @[]
   var expects: seq[string] = @[]
+  var expectsRaw: seq[string] = @[]
   var cmd: seq[string] = @[]
 
   for kind, key, val in getopt():
@@ -200,6 +205,7 @@ proc main =
                                    cols: parseInt(val[colon + 1 ..< x]),
                                    rows: parseInt(val[x + 1 .. ^1]))
       of "expect", "e": expects.add val
+      of "expect-raw": expectsRaw.add unescape(val)
       of "expect-exit": expectExit = true
       of "dump", "d": dump = true
       of "help", "h": usage(); return
@@ -287,7 +293,13 @@ proc main =
     else:
       inc failures
       echo "  FAIL  ", want
-  if expects.len == 0 and not expectExit:
+  for want in expectsRaw:
+    if outp.contains(want):
+      echo "  PASS  raw ", want.escape
+    else:
+      inc failures
+      echo "  FAIL  raw ", want.escape
+  if expects.len == 0 and expectsRaw.len == 0 and not expectExit:
     echo "captured ", outp.len, " bytes"
   elif failures == 0:
     echo "ALL PASS"
