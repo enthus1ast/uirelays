@@ -92,6 +92,7 @@ var
   captured*: string             ## offscreen: every emitted byte, for tests
   gWinch = false                ## SIGWINCH fired; a resize is pending
   gShutdown = false             ## SIGINT/SIGTERM fired; a Quit is pending
+  gFocus = -1'i8                ## -1 unknown, 0 lost, 1 gained (dedupe)
   sigFd: array[0 .. 1, cint] = [-1.cint, -1.cint]  ## self-pipe for wakeups
   sigByte: uint8 = 0            ## the byte the signal handlers write
   escAccum: string              ## an escape sequence cut off mid-way, held
@@ -815,10 +816,17 @@ proc emitCSI(seq: openArray[uint8]) =
     of 22: emitKeyPair(KeyF12, mods)
     else: discard
   of ord('I'):
-    ## Focus in/out, when mode 1004 is enabled. They carry no payload.
-    eventQueue.add Event(kind: WindowFocusGainedEvent)
+    ## Focus in/out, when mode 1004 is enabled. They carry no payload. A
+    ## terminal may report the same transition more than once (blur *and*
+    ## deactivate both send `CSI O`), so the state is only reported when it
+    ## actually changes.
+    if gFocus != 1'i8:
+      gFocus = 1'i8
+      eventQueue.add Event(kind: WindowFocusGainedEvent)
   of ord('O'):
-    eventQueue.add Event(kind: WindowFocusLostEvent)
+    if gFocus != 0'i8:
+      gFocus = 0'i8
+      eventQueue.add Event(kind: WindowFocusLostEvent)
   of ord('m'), ord('d'), ord('S'), ord('T'):
     ## SGR attributes, cursor-position, page-scroll: nothing to report.
     discard
@@ -1122,6 +1130,7 @@ proc initTerminalDriver*() =
   captured.setLen 0
   escAccum.setLen 0
   utf8State = newUtf8Decoder()
+  gFocus = -1'i8
   gFirstFrame = true
 
   ## Populate the five global relays. Each field here points at a module-level

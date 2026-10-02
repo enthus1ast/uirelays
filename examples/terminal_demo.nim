@@ -14,8 +14,10 @@
 ##
 ## Controls:
 ##   mouse      move the pointer, click a button, scroll the wheel
+##   left click on empty space
+##              drop a point; consecutive points are joined with `drawLine`
 ##   1-4        activate the matching button from the keyboard
-##   c          clear the event log
+##   c          clear the event log and the drawn line
 ##   Esc/Ctrl+Q quit
 
 import std/strutils
@@ -98,6 +100,7 @@ proc main =
   var pressed = -1
   var log: seq[string] = @[]
   var typed: seq[string] = @[]   ## typed codepoints (each event is one)
+  var polyline: seq[Point] = @[] ## left clicks on empty space, joined by lines
   var buttons: array[ButtonCount, Button]
 
   addLog(log, "Ready -- move the mouse, click a button, scroll, type.")
@@ -118,7 +121,8 @@ proc main =
       addLog(log, "Theme -> " & $theme)
     of 2:
       log.setLen 0
-      addLog(log, "Log cleared")
+      polyline.setLen 0
+      addLog(log, "Log and line cleared")
     of 3:
       running = false
     else: discard
@@ -167,6 +171,10 @@ proc main =
         addLog(log, "MouseDown " & $e.button & tag & " @ " & $e.x & "," & $e.y)
         if e.button == LeftButton and pressed >= 0:
           activate(pressed)
+        elif e.button == LeftButton:
+          ## Empty space: drop a vertex for the `drawLine` polyline.
+          polyline.add point(e.x, e.y)
+          if polyline.len > 64: polyline.delete(0)
       of MouseUpEvent:
         mouseX = e.x
         mouseY = e.y
@@ -188,7 +196,8 @@ proc main =
           activate(ord(e.key) - ord(Key1))
         of KeyC:
           log.setLen 0
-          addLog(log, "Log cleared")
+          polyline.setLen 0
+          addLog(log, "Log and line cleared")
         of KeyY:
           if CtrlPressed in e.mods:
             var copied = ""
@@ -276,8 +285,21 @@ proc main =
 
     # help line
     discard drawText(font, margin, helpY,
-                     "1-4 buttons  c clear  Ctrl/Shift/Alt logged  Ctrl+Q quit",
+                     "1-4 buttons  c clear  click empty: draw  Ctrl+Q quit",
                      muted, bg)
+
+    # The `drawLine` polyline: segments between the dropped points, a marker at
+    # each vertex, and a rubber band from the last point to the pointer. Drawn
+    # before the pointer so the pointer stays on top.
+    if polyline.len > 0:
+      for i in 1 ..< polyline.len:
+        drawLine(polyline[i - 1].x, polyline[i - 1].y,
+                 polyline[i].x, polyline[i].y, palette[theme])
+      for p in polyline:
+        fillRect(rect(p.x, p.y, 1, 1), fg)
+      if mouseSeen:
+        let last = polyline[^1]
+        drawLine(last.x, last.y, mouseX, mouseY, border)
 
     # the virtual pointer, last so it is always on top
     if mouseSeen:

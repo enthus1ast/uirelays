@@ -113,6 +113,17 @@ proc renderTests =
   check("drawn 'ü' emits both UTF-8 bytes", captured.contains("\xC3\xBC"))
   check("measureText counts 'äöü' as three columns",
     measureText(font, "äöü").w == 3)
+
+  ## drawLine paints one cell per step; each new x forces a cursor move, so the
+  ## five-cell line below yields exactly five `...H` sequences.
+  captured.setLen 0
+  fillRect(rect(0, 0, 40, 10), color(30, 30, 46))
+  refresh()
+  captured.setLen 0
+  drawLine(0, 0, 4, 0, color(205, 0, 0))
+  refresh()
+  check("drawLine paints five cells", captured.count("H") == 5)
+  check("drawLine uses the line colour", captured.contains("\e[31m"))
   closeFont(font)
 
 # ---------------------------------------------------------------------------
@@ -367,14 +378,22 @@ proc relayTests =
   setCursor(curDefault)
   check("setCursor(curDefault) emits a steady block", captured.contains("\e[2 q"))
 
-  ## Focus in/out (mode 1004) turn into the focus events.
+  ## Focus in/out (mode 1004) turn into the focus events; repeats are
+  ## deduplicated because terminals report the same transition more than once.
   var e = Event()
   feedBytes(@[0x1B'u8, ord('[').uint8, ord('I').uint8])
   check("ESC[I -> WindowFocusGainedEvent",
     pollEvent(e) and e.kind == WindowFocusGainedEvent)
+  feedBytes(@[0x1B'u8, ord('[').uint8, ord('I').uint8])
+  check("repeated ESC[I is deduplicated", not pollEvent(e))
   feedBytes(@[0x1B'u8, ord('[').uint8, ord('O').uint8])
   check("ESC[O -> WindowFocusLostEvent",
     pollEvent(e) and e.kind == WindowFocusLostEvent)
+  feedBytes(@[0x1B'u8, ord('[').uint8, ord('O').uint8])
+  check("repeated ESC[O is deduplicated", not pollEvent(e))
+  feedBytes(@[0x1B'u8, ord('[').uint8, ord('I').uint8])
+  check("focus gained again after lost",
+    pollEvent(e) and e.kind == WindowFocusGainedEvent)
 
 # ---------------------------------------------------------------------------
 proc main() =
