@@ -23,19 +23,22 @@ nim c --hints:off --path:src -d:terminal -o:.build/terminal_demo examples/termin
 nim c --hints:off --path:src -d:terminal -o:.build/terminal_button examples/terminal_button.nim
 
 echo "smoke: terminal_demo"
-.build/pty_smoke .build/terminal_demo --wait=2.0 \
+.build/pty_smoke .build/terminal_demo --wait=2.5 \
   --send='300:\e[<35;3;3M' \
   --send='450:\e[<0;3;3M' \
   --send='550:\e[<0;3;3m' \
   --send='700:\e[<64;3;3M' \
   --send='850:\e[<66;3;3M' \
-  --send='1200:\e[<35;70;20M' \
-  --send='1500:\ex' \
+  --resize='1000:60x20' \
+  --send='1200:\e[<35;40;12M' \
+  --send='1500:\x03' \
   --expect='uirelays :: terminal demo' \
   --expect='Count -> 1' \
   --expect='Clicks: 1' \
   --expect='Wheel y=1' \
-  --expect='Wheel x=1'
+  --expect='Wheel x=1' \
+  --expect='60x20' \
+  --expect-exit
 
 echo "smoke: terminal_button"
 .build/pty_smoke .build/terminal_button --wait=1.4 \

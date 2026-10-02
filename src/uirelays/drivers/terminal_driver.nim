@@ -40,6 +40,9 @@ const
   SIGWINCH* = cint(28)
   SIG_DFL*  = cast[proc(a: cint) {.noconv.}](0)
 
+proc c_pipe(fds: ptr array[0 .. 1, cint]): cint
+  {.importc: "pipe", header: "<unistd.h>".}
+
 # ---------------------------------------------------------------------------
 # The cell, and the module-level state that one live surface keeps.
 # ---------------------------------------------------------------------------
@@ -82,6 +85,8 @@ var
   captured*: string             ## offscreen: every emitted byte, for tests
   gWinch = false                ## SIGWINCH fired; a resize is pending
   gShutdown = false             ## SIGINT/SIGTERM fired; a Quit is pending
+  sigFd: array[0 .. 1, cint] = [-1.cint, -1.cint]  ## self-pipe for wakeups
+  sigByte: uint8 = 0            ## the byte the signal handlers write
   curMods: set[Modifier]
   escAccum: string              ## an escape sequence cut off mid-way, held
   eventQueue: seq[Event]
@@ -502,7 +507,13 @@ proc refresh*() =
   ## MaxChangedFrame: past it the frame is too busy to diff cheaply, so a full
   ## clear + redraw wins.
   var sb = ""
-  if gFirstFrame:
+  ## `gFirstFrame` means the physical screen is about to be cleared, so every
+  ## cell must be repainted. Diffing against `lastBuf` here would skip the cells
+  ## that happen not to have changed since before the clear -- which is exactly
+  ## the blank header a resize used to leave behind, the old buffer's contents
+  ## for the overlapping region matching the new frame.
+  let full = gFirstFrame
+  if full:
     sb.add "\e[2J\e[0m"
     if tty:
       sb.add "\e[?25l"
@@ -518,8 +529,8 @@ proc refresh*() =
   for y in 0 ..< rows:
     for x in 0 ..< cols:
       let idx = y * cols + x
-      if buf[idx] != lastBuf[idx]:
-        if changed >= MaxChangedFrame:
+      if full or buf[idx] != lastBuf[idx]:
+        if not full and changed >= MaxChangedFrame:
           capped = true
           break
         emitCell(sb, x, y, buf[idx], outCol, outRow, outFg, outBg, outBold,
@@ -864,6 +875,14 @@ proc handleResizeEvent() =
   eventQueue.add Event(kind: WindowMetricsEvent,
                        x: cols, y: rows, scaleX: 1, scaleY: 1, uiScale: 100)
 
+proc drainSignalPipe() =
+  ## Empty the self-pipe. The flags the handlers set are what the code acts on;
+  ## the bytes are only there to make `select` return.
+  if sigFd[0] < 0: return
+  var buf: array[64, uint8]
+  while read(sigFd[0], addr buf[0], buf.len) > 0:
+    discard
+
 proc waitReady(timeoutMs: int): bool =
   ## Block until an event is queued, the timeout expires, or shutdown fires.
   ## Pumps input on every iteration so a real terminal never reports "not
@@ -888,8 +907,13 @@ proc waitReady(timeoutMs: int): bool =
     var fds: TFdSet
     FD_ZERO(fds)
     FD_SET(STDIN_FILENO, fds)
-    let n = select(STDIN_FILENO + 1, fds.addr, nil, nil, tvptr)
+    var nfds = STDIN_FILENO + 1
+    if sigFd[0] >= 0:
+      FD_SET(sigFd[0], fds)
+      if sigFd[0] >= nfds: nfds = sigFd[0] + 1
+    let n = select(cint(nfds), fds.addr, nil, nil, tvptr)
     if n > 0:
+      drainSignalPipe()
       discard drainInput()
     elif timeoutMs < 0 and n < 0:
       continue   # EINTR from a signal handler: block again
@@ -932,9 +956,26 @@ proc shutdown*() =
 # ---------------------------------------------------------------------------
 
 proc installSignals() =
-  proc onWinch(sig: cint) {.noconv.} = discard gWinch
-  proc onTerm(sig: cint) {.noconv.} = discard gShutdown
-  proc onInt(sig: cint) {.noconv.} = discard gShutdown
+  ## A self-pipe: each handler records its flag *and* writes one byte, and
+  ## `waitReady` selects on the read end. `signal()` installs with SA_RESTART
+  ## on glibc, so a blocking `select()` would be restarted rather than return
+  ## EINTR; the pipe byte is what actually wakes it, and it also closes the
+  ## race where the signal lands between the flag check and the select. (The
+  ## handlers used to be `discard gWinch`, which read the flag and threw it
+  ## away instead of setting it -- so nothing was ever signalled.)
+  if sigFd[0] < 0:
+    if c_pipe(addr sigFd) == 0:
+      discard fcntl(sigFd[0], F_SETFL, O_NONBLOCK)
+      discard fcntl(sigFd[1], F_SETFL, O_NONBLOCK)
+  proc onWinch(sig: cint) {.noconv.} =
+    gWinch = true
+    discard write(sigFd[1], addr sigByte, 1)
+  proc onTerm(sig: cint) {.noconv.} =
+    gShutdown = true
+    discard write(sigFd[1], addr sigByte, 1)
+  proc onInt(sig: cint) {.noconv.} =
+    gShutdown = true
+    discard write(sigFd[1], addr sigByte, 1)
   signal(SIGWINCH, onWinch)
   signal(SIGINT, onInt)
   signal(SIGTERM, onTerm)
@@ -1004,6 +1045,7 @@ proc initTerminalDriver*() =
       e = eventQueue[0]
       eventQueue.delete(0)
       return true
+    drainSignalPipe()
     discard drainInput()
     if eventQueue.len > 0:
       e = eventQueue[0]

@@ -22,6 +22,8 @@
 ##                   an ioctl(TIOCSWINSZ) at MS, which makes the kernel send
 ##                   SIGWINCH to the program (exercises the resize path)
 ##   --expect=TEXT   fail unless TEXT is somewhere on the reconstructed screen
+##   --expect-exit   fail unless the program exited before `--wait` (i.e. it
+##                   handled a quit/Ctrl-C rather than being killed)
 ##   --dump          print the reconstructed screen
 ##
 ## Example -- click the first button of terminal_demo and check the log:
@@ -144,6 +146,7 @@ proc main =
   var rows = 24
   var waitSec = 3.0
   var dump = false
+  var expectExit = false
   var sends: seq[ScriptedInput] = @[]
   var resizes: seq[ScriptedResize] = @[]
   var expects: seq[string] = @[]
@@ -171,6 +174,7 @@ proc main =
                                    cols: parseInt(val[colon + 1 ..< x]),
                                    rows: parseInt(val[x + 1 .. ^1]))
       of "expect", "e": expects.add val
+      of "expect-exit": expectExit = true
       of "dump", "d": dump = true
       of "help", "h": usage(); return
       else: quit "unknown option: " & key
@@ -236,13 +240,20 @@ proc main =
   var status: cint
   discard waitpid(pid, status, 0)
 
+  var failures = 0
+  if expectExit:
+    if alive:
+      echo "  FAIL  program did not exit before --wait"
+      inc failures
+    else:
+      echo "  PASS  program exited"
+
   let grid = reconstruct(outp, finalCols, finalRows)
   if dump:
     echo "=== reconstructed screen (", finalCols, "x", finalRows, ") ==="
     for r in 0 ..< grid.len:
       echo align($r, 2), "|", grid[r], "|"
 
-  var failures = 0
   let screen = grid.join("\n")
   for want in expects:
     if screen.contains(want):
@@ -250,7 +261,7 @@ proc main =
     else:
       inc failures
       echo "  FAIL  ", want
-  if expects.len == 0:
+  if expects.len == 0 and not expectExit:
     echo "captured ", outp.len, " bytes"
   elif failures == 0:
     echo "ALL PASS"

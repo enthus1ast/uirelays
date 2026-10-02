@@ -200,7 +200,7 @@ proc main =
     # live status
     discard drawText(font, margin, btnY + btnH + 1,
                      "Clicks: " & $counter, fg, bg)
-    var status = "mouse x=" & $mouseX & " y=" & $mouseY
+    var status = $width & "x" & $height & "  mouse x=" & $mouseX & " y=" & $mouseY
     if hovered >= 0:
       status &= "  over: " & buttons[hovered].label
     elif not mouseSeen:
