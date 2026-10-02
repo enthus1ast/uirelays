@@ -1,0 +1,228 @@
+## tools/pty_smoke.nim
+## Run a terminal program in a pseudo-terminal, feed it scripted input, then
+## reconstruct the screen from the ANSI stream and check what it drew.
+##
+## This is the tool the terminal demos are smoke-tested with: it drives a real
+## TTY, so the driver takes its `tty` path (raw mode, alternate screen, SGR
+## mouse enable) instead of the offscreen capture the unit tests use.
+##
+## Build:
+##   nim c -o:pty_smoke tools/pty_smoke.nim
+##
+## Use:
+##   pty_smoke <program> [args...] [options]
+##
+## Options (values use `=`; repeat `--send`/`--expect` as needed):
+##   --cols=N        pty width in cells        (default 80)
+##   --rows=N        pty height in cells       (default 24)
+##   --wait=SEC      how long to drive it      (default 3.0)
+##   --send=MS:BYTES input at MS milliseconds; `\e`, `\n`, `\r`, `\t`, `\xHH`
+##                   and `\\` are translated
+##   --expect=TEXT   fail unless TEXT is somewhere on the reconstructed screen
+##   --dump          print the reconstructed screen
+##
+## Example -- click the first button of terminal_demo and check the log:
+##   nim c -d:terminal -o:/tmp/terminal_demo examples/terminal_demo.nim
+##   nim c -o:/tmp/pty_smoke tools/pty_smoke.nim
+##   /tmp/pty_smoke /tmp/terminal_demo \
+##     --send='300:\e[<35;3;3M' --send='450:\e[<0;3;3M' \
+##     --send='550:\e[<0;3;3m'  --send='900:\ex' \
+##     --expect='Count -> 1' --dump
+##
+## Exit status is non-zero when any `--expect` was not found (or the program
+## never started).
+
+import std/[algorithm, os, parseopt, posix, strutils, times]
+
+type
+  Winsize {.importc: "struct winsize", header: "<termios.h>".} = object
+    ws_row*, ws_col*, ws_xpixel*, ws_ypixel*: cushort
+  ScriptedInput = object
+    atMs*: int
+    bytes*: string
+
+proc openpty(amaster, aslave: ptr cint; name: cstring;
+             termp, winp: pointer): cint {.importc, header: "<pty.h>".}
+proc login_tty(fd: cint): cint {.importc, header: "<utmp.h>".}
+
+const HexDigits = {'0' .. '9', 'a' .. 'f', 'A' .. 'F'}
+
+proc hexVal(c: char): int =
+  if c in {'0' .. '9'}: ord(c) - ord('0')
+  elif c in {'a' .. 'f'}: ord(c) - ord('a') + 10
+  else: ord(c) - ord('A') + 10
+
+proc unescape(s: string): string =
+  ## Translate the handful of escapes a terminal test needs.
+  var i = 0
+  while i < s.len:
+    if s[i] == '\\' and i + 1 < s.len:
+      case s[i + 1]
+      of 'e', 'E': result.add '\e'; i += 2
+      of 'n': result.add '\n'; i += 2
+      of 'r': result.add '\r'; i += 2
+      of 't': result.add '\t'; i += 2
+      of '\\': result.add '\\'; i += 2
+      of 'x':
+        var v = 0
+        var j = i + 2
+        var n = 0
+        while j < s.len and n < 2 and s[j] in HexDigits:
+          v = v * 16 + hexVal(s[j])
+          inc j
+          inc n
+        result.add chr(v)
+        i = j
+      else:
+        result.add s[i]
+        inc i
+    else:
+      result.add s[i]
+      inc i
+
+proc reconstruct(data: string; w, h: int): seq[string] =
+  ## A tiny ANSI screen model: cursor positioning, erase-display, and literal
+  ## text. Colours and private modes are ignored -- enough to read the UI back.
+  result = newSeq[string](h)
+  for r in 0 ..< h: result[r] = repeat(' ', w)
+  var cx, cy = 0
+  var i = 0
+  while i < data.len:
+    let c = data[i]
+    if c == '\e' and i + 1 < data.len:
+      if data[i + 1] == '[':
+        var j = i + 2
+        while j < data.len and data[j] notin {'@' .. '~'}: inc j
+        if j >= data.len: break
+        let params = data[(i + 2) ..< j]
+        case data[j]
+        of 'H':
+          let p = params.split(';')
+          cy = (if p.len > 0 and p[0].len > 0: parseInt(p[0]) else: 1) - 1
+          cx = (if p.len > 1 and p[1].len > 0: parseInt(p[1]) else: 1) - 1
+        of 'J':
+          for r in 0 ..< h: result[r] = repeat(' ', w)
+        else: discard
+        i = j + 1
+        continue
+      elif data[i + 1] == ']':          # OSC ... BEL
+        var j = i + 2
+        while j < data.len and data[j] != '\a': inc j
+        i = j + 1
+        continue
+      else:
+        i += 2
+        continue
+    elif ord(c) >= 32:
+      if cy >= 0 and cy < h and cx >= 0 and cx < w:
+        result[cy][cx] = c
+      inc cx
+    i += 1
+
+proc toCStringArray(args: seq[string]): cstringArray =
+  result = cast[cstringArray](alloc0((args.len + 1) * sizeof(cstring)))
+  for i, a in args:
+    result[i] = a.cstring
+
+proc usage() =
+  echo "usage: pty_smoke <program> [args...] [--cols=N] [--rows=N] [--wait=SEC]"
+  echo "                 [--send=MS:BYTES]... [--expect=TEXT]... [--dump]"
+
+proc main =
+  var cols = 80
+  var rows = 24
+  var waitSec = 3.0
+  var dump = false
+  var sends: seq[ScriptedInput] = @[]
+  var expects: seq[string] = @[]
+  var cmd: seq[string] = @[]
+
+  for kind, key, val in getopt():
+    case kind
+    of cmdArgument: cmd.add key
+    of cmdLongOption, cmdShortOption:
+      case key
+      of "cols", "c": cols = parseInt(val)
+      of "rows", "r": rows = parseInt(val)
+      of "wait", "w": waitSec = parseFloat(val)
+      of "send", "s":
+        let colon = val.find(':')
+        if colon < 0: quit "--send needs MS:BYTES, got: " & val
+        sends.add ScriptedInput(atMs: parseInt(val[0 ..< colon]),
+                                bytes: unescape(val[colon + 1 .. ^1]))
+      of "expect", "e": expects.add val
+      of "dump", "d": dump = true
+      of "help", "h": usage(); return
+      else: quit "unknown option: " & key
+    of cmdEnd: discard
+
+  if cmd.len == 0:
+    usage()
+    quit 1
+  sends.sort(proc (a, b: ScriptedInput): int = cmp(a.atMs, b.atMs))
+
+  var ws = Winsize(ws_row: rows.cushort, ws_col: cols.cushort)
+  var master, slave: cint
+  if openpty(addr master, addr slave, nil, nil, addr ws) != 0:
+    quit "openpty failed"
+
+  let prog = toCStringArray(cmd)
+  let pid = fork()
+  if pid == 0:
+    discard setsid()
+    discard login_tty(slave)
+    putEnv("TERM", "xterm-256color")
+    discard execv(cmd[0].cstring, prog)
+    quit 1
+  discard close(slave)
+
+  var outp = ""
+  var idx = 0
+  let start = epochTime()
+  var alive = true
+  while alive and epochTime() - start < waitSec:
+    var fds: TFdSet
+    FD_ZERO(fds)
+    FD_SET(master, fds)
+    var tv = Timeval(tv_sec: posix.Time(0), tv_usec: posix.Suseconds(50_000))
+    if select(master + 1, addr fds, nil, nil, addr tv) > 0:
+      var buf: array[65536, char]
+      let r = read(master, addr buf[0], buf.len)
+      if r <= 0: alive = false
+      else:
+        for i in 0 ..< r: outp.add buf[i]
+    let t = epochTime() - start
+    while idx < sends.len and t * 1000.0 >= sends[idx].atMs.float:
+      let msg = sends[idx].bytes
+      if msg.len > 0:
+        discard write(master, unsafeAddr msg[0], msg.len)
+      inc idx
+
+  if alive:
+    discard kill(pid, SIGKILL)
+  var status: cint
+  discard waitpid(pid, status, 0)
+
+  let grid = reconstruct(outp, cols, rows)
+  if dump:
+    echo "=== reconstructed screen (", cols, "x", rows, ") ==="
+    for r in 0 ..< grid.len:
+      echo align($r, 2), "|", grid[r], "|"
+
+  var failures = 0
+  let screen = grid.join("\n")
+  for want in expects:
+    if screen.contains(want):
+      echo "  PASS  ", want
+    else:
+      inc failures
+      echo "  FAIL  ", want
+  if expects.len == 0:
+    echo "captured ", outp.len, " bytes"
+  elif failures == 0:
+    echo "ALL PASS"
+  else:
+    echo failures, " FAILURE(S)"
+  if failures > 0: quit 1
+
+main()

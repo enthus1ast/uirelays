@@ -85,6 +85,9 @@ var
   curMods: set[Modifier]
   escAccum: string              ## an escape sequence cut off mid-way, held
   eventQueue: seq[Event]
+  lastClickTick = 0             ## ms of the previous press, for click runs
+  lastClickX, lastClickY = 0
+  clickCount = 1
   outSink: proc (s: string) {.nimcall.}
 
 proc emit*(s: string) {.nimcall.} =
@@ -152,8 +155,11 @@ proc termColor*(c: Color; bg: bool = false): string =
     (if bg: "48;5;" else: "38;5;") & $idx
   else:
     let base = (if bg: 40'u8 else: 30'u8)
-    let bright = uint8(if idx >= 8: 8 else: 0)
-    $(base + bright + uint8(idx))
+    if idx < 8:
+      $(base + uint8(idx))          # 30-37 / 40-47
+    else:
+      $(base + 52'u8 + uint8(idx))  # 90-97 / 100-107, not the 46-53/56-63
+                                    # the old `30+8+idx` produced
 
 proc over*(c: Color): Color =
   ## Composite a colour over itself, dropping its alpha. A solid fill asks for
@@ -189,7 +195,7 @@ proc maxValForLen(k: int): uint32 =
   of 4: 0x10FFFF'u32
   else: 0xFFFFFFFF'u32
 
-proc newUtf8Decoder(): Utf8Decoder =
+proc newUtf8Decoder*(): Utf8Decoder =
   Utf8Decoder(n: 0, value: 0'u32, maxVal: 0'u32, totalLen: 1)
 
 proc decodeByte*(d: var Utf8Decoder; b: uint8): tuple[result: DecResult, value: uint32] =
@@ -349,11 +355,13 @@ proc drawTextBody*(f: Font; x, y: int; text: string;
   ## box reads clean. Returns the same extent `measureText` would.
   let res = (if known.w > 0: known else: measureText(f, text))
   var cx = x
-  let inBounds = (cx >= 0 and y >= 0 and cx < cols and y < rows)
-  let inClip = (cx >= clip.x and cx < clip.x + clip.w and y >= clip.y and y < clip.y + clip.h)
+  ## `setCell` bounds- and clip-checks every cell itself, so the run stays
+  ## correct even when it starts at a negative x. (The old code precomputed
+  ## `inBounds`/`inClip` once, from the first character only: a label starting
+  ## at x < 0 was discarded whole, and characters past a boundary were still
+  ## tested against the first cell's position.)
   for ch in text:
-    if inBounds and inClip:
-      setCell(cx, y, makeCell(ch, fg, bg))
+    setCell(cx, y, makeCell(ch, fg, bg))
     inc cx
   res
 
@@ -390,10 +398,16 @@ proc resizeSurface(nr, nc: int) =
   buf.setLen(rows * cols)
   lastBuf.setLen(rows * cols)
   gFirstFrame = true
+  ## A caller that never calls `setClipRect` draws into the whole surface, so
+  ## the default clip is the full grid -- not the empty rectangle a global
+  ## `Rect()` starts as, which would silently discard every cell.
+  clip = Rect(x: 0, y: 0, w: cols, h: rows)
   ## An empty cell is a space on the default (black-on-black) background; a full
-  ## redraw clears the stale cells from the old size.
+  ## redraw clears the stale cells from the old size. Alpha is pinned to 255 so
+  ## a cell built here compares equal to the same colour built by `over`.
   for i in 0 ..< buf.len:
-    buf[i] = makeCell(' ', Color(r: 0, g: 0, b: 0), Color(r: 0, g: 0, b: 0))
+    buf[i] = makeCell(' ', Color(r: 0, g: 0, b: 0, a: 255'u8),
+                           Color(r: 0, g: 0, b: 0, a: 255'u8))
 
 proc enterTerminal()   ## forward decl: installed with the terminal, below
 proc createWindow*(layout: var ScreenLayout;
@@ -421,6 +435,7 @@ proc createWindow*(layout: var ScreenLayout;
     resizeSurface(reqH, reqW)   # offscreen: requested height/width are cells
   if rows == 0 or cols == 0:
     resizeSurface(24, 80)
+  clip = Rect(x: 0, y: 0, w: cols, h: rows)
   layout.width = cols
   layout.height = rows
   layout.pitch = cols
@@ -461,22 +476,24 @@ proc setWindowTitle*(title: string) =
 
 proc emitCell(sb: var string; x, y: int; cell: Cell;
               outCol, outRow: var int; outFg, outBg: var Color;
-              outBold: var bool) =
+              outBold, outValid: var bool) =
   if x != outCol or y != outRow:
     sb.add "\e[" & $((y + 1)) & ";" & $((x + 1)) & "H"
     outCol = x
     outRow = y
-    outFg = Color(r: 255, g: 255, b: 255, a: 255)   # force a rewrite
-    outBg = outFg
-    outBold = false
-  if (cell.attr and 1'u16) != 0'u16 and not outBold:
+    ## Moving the cursor leaves the SGR attributes untouched, so the tracked
+    ## colours and bold state stay valid -- nothing is forced here. (The old
+    ## code reset them to white, which suppressed the colour escape whenever
+    ## the next cell happened to be white, and lost track of bold.)
+  if (cell.attr and 1'u16) != 0'u16 and (not outValid or not outBold):
     sb.add "\e[1m"; outBold = true
-  elif (cell.attr and 1'u16) == 0'u16 and outBold:
+  elif (cell.attr and 1'u16) == 0'u16 and outValid and outBold:
     sb.add "\e[22m"; outBold = false
-  if cell.fg != outFg:
+  if not outValid or cell.fg != outFg:
     sb.add "\e[" & termColor(cell.fg, false) & "m"; outFg = cell.fg
-  if cell.bg != outBg:
+  if not outValid or cell.bg != outBg:
     sb.add "\e[" & termColor(cell.bg, true) & "m"; outBg = cell.bg
+  outValid = true
   sb.add cell.ch
 
 proc refresh*() =
@@ -486,7 +503,7 @@ proc refresh*() =
   ## clear + redraw wins.
   var sb = ""
   if gFirstFrame:
-    sb.add "\e[2J"
+    sb.add "\e[2J\e[0m"
     if tty:
       sb.add "\e[?25l"
     gFirstFrame = false
@@ -496,6 +513,7 @@ proc refresh*() =
   var outFg = Color(r: 255, g: 255, b: 255, a: 255)
   var outBg = Color(r: 255, g: 255, b: 255, a: 255)
   var outBold = false
+  var outValid = false
   var capped = false
   for y in 0 ..< rows:
     for x in 0 ..< cols:
@@ -504,7 +522,8 @@ proc refresh*() =
         if changed >= MaxChangedFrame:
           capped = true
           break
-        emitCell(sb, x, y, buf[idx], outCol, outRow, outFg, outBg, outBold)
+        emitCell(sb, x, y, buf[idx], outCol, outRow, outFg, outBg, outBold,
+                 outValid)
         inc changed
     if capped: break
   if capped:
@@ -556,38 +575,83 @@ proc sgrMouseBtn(b: int): MouseButton =
   of 2: RightButton
   else: LeftButton
 
-proc emitSGRMouse(bytes: openArray[uint8]; mIdx: int) =
-  ## `bytes[mIdx]` is the `M`/`m`; the next three bytes are button, col, row.
-  ## 1-based coordinates, subtract one; the button/mods live in the first byte
-  ## (SGR extended mode: button in the low bits, Shift bit 2, Ctrl bit 4, move
-  ## bit 5, scroll bit 6).
-  if mIdx + 3 >= bytes.len: return
-  let buttonByte = bytes[mIdx + 1].uint32
-  let col = bytes[mIdx + 2].uint8
-  let row = bytes[mIdx + 3].uint8
-  let release = bytes[mIdx] == ord('m')
+proc nextClickCount(x, y: int): int =
+  ## A press within 500 ms and 4 cells of the previous one continues a click
+  ## run (double/triple click), the same rule the X11 and WinAPI drivers use.
+  ## The terminal reports no click count of its own, so it is derived here.
+  let now = getTicks()
+  if now - lastClickTick < 500 and
+     abs(x - lastClickX) < 4 and abs(y - lastClickY) < 4:
+    inc clickCount
+  else:
+    clickCount = 1
+  lastClickTick = now
+  lastClickX = x
+  lastClickY = y
+  result = clickCount
+
+proc emitSGRMouse(seq: openArray[uint8]) =
+  ## SGR mouse (1006): `ESC [ < button ; Px ; Py M/m`. The trailing `M`/`m`
+  ## marks press/release; everything between `<` and it is ASCII decimal.
+  ## `button` is raw -- SGR adds no 32 (ctlseqs.ms, "SGR (1006)"): bits 0-1
+  ## identity (0=left, 1=middle, 2=right, 3=release), bit 2 Shift, bit 3
+  ## Meta/Alt, bit 4 Control, bit 5 motion (1002/1003), bit 6 wheel/tilt
+  ## (buttons 4-7), bit 7 extra buttons (8-11). Coordinates are 1-based.
+  if seq.len < 7 or seq[2] != ord('<') or seq[^1] notin {ord('M'), ord('m')}:
+    return
+  let release = seq[^1] == ord('m')
+  ## Split the three semicolon-separated numbers between `<` (index 2) and the
+  ## final `M`/`m` (index ^1) out of the byte run, capping each so a
+  ## pathological report cannot overflow `int`.
+  var parts: seq[int] = @[]
+  var n = -1
+  for k in 3 ..< seq.len - 1:
+    let c = seq[k]
+    if c in 0x30'u8 .. 0x39'u8:
+      if n < 0: n = 0
+      if n < 0xFFFF: n = n * 10 + (int(c) - ord('0'))
+    elif c == ord(';'):
+      parts.add (if n < 0: 0 else: n)
+      n = -1
+  if n >= 0: parts.add n
+  if parts.len != 3: return
+  let buttonByte = parts[0].uint32
+  let col = parts[1]
+  let row = parts[2]
+  if (buttonByte and 1'u32 shl 7) != 0'u32:
+    ## Buttons 8-11 (`+128`): uirelays has no such button; ignore the report.
+    return
   let move = (buttonByte and 1'u32 shl 5) != 0'u32
-  let scroll = (buttonByte and 1'u32 shl 6) != 0'u32
+  let wheel = (buttonByte and 1'u32 shl 6) != 0'u32
   let shift = (buttonByte and 1'u32 shl 2) != 0'u32
+  let alt = (buttonByte and 1'u32 shl 3) != 0'u32
   let ctrl = (buttonByte and 1'u32 shl 4) != 0'u32
   let btnbits = (buttonByte and 3'u32).int
   var mods: set[Modifier] = {}
   if shift: mods.incl ShiftPressed
   if ctrl: mods.incl CtrlPressed
-  let mx = if col > 0: col.int - 1 else: 0
-  let my = if row > 0: row.int - 1 else: 0
+  if alt: mods.incl AltPressed
+  let mx = if col > 0: col - 1 else: 0
+  let my = if row > 0: row - 1 else: 0
   if release:
     eventQueue.add Event(kind: MouseUpEvent, x: mx, y: my,
                          button: sgrMouseBtn(btnbits), mods: mods)
-  elif scroll:
-    eventQueue.add Event(kind: MouseWheelEvent, x: mx,
-                         mods: mods,
-                         y: (if (buttonByte and 1'u32) != 0'u32: -1 else: 1))
+  elif wheel:
+    ## Buttons 4/5 (`+64`) scroll vertically; 6/7 (`+64`, bit 1 set) tilt
+    ## horizontally (ctlseqs.ms, "Other buttons"). Deltas live in `x`/`y`
+    ## like the native drivers; bit 0 gives the sign, +1 = up or right.
+    let positive = (buttonByte and 1'u32) == 0'u32
+    let delta = (if positive: 1 else: -1)
+    if (buttonByte and 2'u32) != 0'u32:
+      eventQueue.add Event(kind: MouseWheelEvent, x: delta, y: 0, mods: mods)
+    else:
+      eventQueue.add Event(kind: MouseWheelEvent, x: 0, y: delta, mods: mods)
   elif move:
     eventQueue.add Event(kind: MouseMoveEvent, x: mx, y: my, mods: mods)
   else:
     eventQueue.add Event(kind: MouseDownEvent, x: mx, y: my,
-                         button: sgrMouseBtn(btnbits), mods: mods, clicks: 1)
+                         button: sgrMouseBtn(btnbits), mods: mods,
+                         clicks: nextClickCount(mx, my))
 
 proc emitSS3(fn: uint8) =
   ## `\eO <fn>`: the application-cursor SS3 arrows and function keys.
@@ -606,14 +670,11 @@ proc emitSS3(fn: uint8) =
 
 proc emitCSI(seq: openArray[uint8]) =
   ## `seq` is a complete CSI: ESC, '[', params, final byte.
-  if seq.len >= 2 and seq[1] == ord('<'):
-    ## Private CSI mouse: ESC [ <btn> ;col ;row M(m).
-    var mIdx = -1
-    for k in 2 ..< seq.len:
-      if seq[k] in {ord('M'), ord('m')}:
-        mIdx = k
-        break
-    if mIdx >= 0: emitSGRMouse(seq, mIdx)
+  if seq.len >= 3 and seq[2] == ord('<'):
+    ## Private CSI mouse (SGR, 1006): ESC [ <btn> ;col ;row M(m). The `<` sits
+    ## at index 2 (seq[0]=ESC, seq[1]='['), so the raw scan for it at index 1
+    ## never matched; hand the whole sequence to the SGR parser instead.
+    emitSGRMouse(seq)
     return
   let final = seq[^1]
   var params: seq[int] = @[]
@@ -671,10 +732,13 @@ proc emitEscape(bytes: openArray[uint8]; i: var int) =
     return
   let c = bytes[i + 1]
   if c == ord('['):
-    ## CSI: params (0x30-0x3F), intermediates (0x20-0x2F), then one final byte.
+    ## CSI: the DEC grammar treats parameter and intermediate bytes (0x20-0x3F,
+    ## which includes `<`, digits, and `;`) as one class that may intermix in
+    ## any order before the single final byte (0x40-0x7E). The old two-scan
+    ## stopped at `;` (0x3B), which broke SGR mouse sequences; merge to a single
+    ## range so the whole CSI reaches emitCSI.
     var j = i + 2
-    while j < bytes.len and bytes[j] in 0x30'u8 .. 0x3F'u8: inc j
-    while j < bytes.len and bytes[j] in 0x20'u8 .. 0x2F'u8: inc j
+    while j < bytes.len and bytes[j] in 0x20'u8 .. 0x3F'u8: inc j
     if j < bytes.len and bytes[j] in 0x40'u8 .. 0x7E'u8:
       var seq = newSeq[uint8](j - i + 1)
       for k in i .. j: seq[k - i] = bytes[k]
@@ -690,14 +754,6 @@ proc emitEscape(bytes: openArray[uint8]; i: var int) =
       i = i + 3
     else:
       escAccum = "\eO"
-      return
-  elif c in {ord('M'), ord('m')}:
-    ## SGR mouse press/move (`M`) or release (`m`); three data bytes follow.
-    if i + 4 < bytes.len:
-      emitSGRMouse(bytes, i + 1)
-      i = i + 5
-    else:
-      escAccum.add char(0x1B'u8); escAccum.add c.chr
       return
   else:
     ## A two-byte sequence. A printable following is the lone Escape key (a real

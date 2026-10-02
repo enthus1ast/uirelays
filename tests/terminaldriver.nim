@@ -9,9 +9,14 @@
 ## Run:
 ##   nim c -r tests/terminaldriver.nim -d:terminal --path:src
 
-import std/os                            # getEnv / putEnv (Nim 2.x: no setEnv)
+import std/[os, strutils]                # getEnv / putEnv, contains
 import uirelays
-import uirelays/drivers/terminal_driver   # for the captured buffer + pure procs
+## Import only the driver's own symbols; a plain `import` of the driver also
+## brings `fillRect`, `refresh`, `createWindow`, ... into scope and makes them
+## ambiguous with the `uirelays` wrappers.
+from uirelays/drivers/terminal_driver import
+  captured, feedBytes, termColor, newUtf8Decoder, decodeByte, utf8Encode,
+  drAscii, drCodepoint, drPartial, drError
 
 ## Force offscreen mode and a fixed 16-colour palette so the assertions below
 ## are deterministic no matter where this is run (CI has no TTY; a developer's
@@ -100,10 +105,12 @@ proc inputTests =
   echo "input parsing:"
   var e = Event()
 
-  ## Plain typing: a key press that is also the text it types.
+  ## Plain typing: the driver fabricates KeyDown, KeyUp, then the TextInput.
   feedBytes(@[ord('a').uint8])
   check("'a' is a KeyDown on A",
     pollEvent(e) and e.kind == KeyDownEvent and e.key == KeyA)
+  check("'a' is a KeyUp on A",
+    pollEvent(e) and e.kind == KeyUpEvent and e.key == KeyA)
   check("'a' is a TextInput of 'a'",
     pollEvent(e) and e.kind == TextInputEvent and e.text[0] == 'a')
 
@@ -114,9 +121,10 @@ proc inputTests =
   check("ESC [ A is KeyUp(Up)",
     pollEvent(e) and e.kind == KeyUpEvent and e.key == KeyUp)
 
-  ## SGR mouse press (ESC [ <1;10;20M) at column 10, row 20 -> (9,19).
+  ## SGR mouse press (ESC [ <0;10;20M) at column 10, row 20 -> (9,19).
+  ## SGR encodes MB1 as 0 (ctlseqs.ms "SGR (1006)"; SGR adds no 32).
   feedBytes(@[0x1B'u8, ord('[').uint8, ord('<').uint8,
-                      ord('1').uint8, ord(';').uint8, ord('1').uint8, ord('0').uint8,
+                      ord('0').uint8, ord(';').uint8, ord('1').uint8, ord('0').uint8,
                       ord(';').uint8, ord('2').uint8, ord('0').uint8, ord('M').uint8])
   check("SGR press is a MouseDown",
     pollEvent(e) and e.kind == MouseDownEvent and e.button == LeftButton)
@@ -124,23 +132,81 @@ proc inputTests =
     check("SGR press reports the cell", e.x == 9 and e.y == 19)
   ## SGR mouse release (lowercase m).
   feedBytes(@[0x1B'u8, ord('[').uint8, ord('<').uint8,
-                      ord('1').uint8, ord(';').uint8, ord('1').uint8, ord('0').uint8,
+                      ord('0').uint8, ord(';').uint8, ord('1').uint8, ord('0').uint8,
                       ord(';').uint8, ord('2').uint8, ord('0').uint8, ord('m').uint8])
   check("SGR release is a MouseUp",
     pollEvent(e) and e.kind == MouseUpEvent)
 
+# ---------------------------------------------------------------------------
+# SGR mouse (1006), verified against xterm's ctlseqs.ms "Mouse Tracking".
+# ---------------------------------------------------------------------------
+proc feedStr(s: string) =
+  var b = newSeq[uint8](s.len)
+  for i, c in s: b[i] = c.uint8
+  feedBytes(b)
+
+proc firstEvent(s: string): Event =
+  feedStr(s)
+  discard pollEvent(result)
+
+proc mouseTests =
+  echo "sgr mouse:"
+  var e: Event
+
+  e = firstEvent("\e[<64;5;5M")
+  check("wheel up -> y = +1",
+    e.kind == MouseWheelEvent and e.x == 0 and e.y == 1)
+  e = firstEvent("\e[<65;5;5M")
+  check("wheel down -> y = -1",
+    e.kind == MouseWheelEvent and e.x == 0 and e.y == -1)
+  e = firstEvent("\e[<66;5;5M")   # button 6 = tilt right
+  check("tilt right -> x = +1",
+    e.kind == MouseWheelEvent and e.x == 1 and e.y == 0)
+  e = firstEvent("\e[<67;5;5M")   # button 7 = tilt left
+  check("tilt left -> x = -1",
+    e.kind == MouseWheelEvent and e.x == -1 and e.y == 0)
+  e = firstEvent("\e[<128;5;5M")  # button 8 has no uirelays equivalent
+  check("extra button 8 is ignored", e.kind == NoEvent)
+
+  e = firstEvent("\e[<2;5;5M")
+  check("SGR value 2 -> RightButton",
+    e.kind == MouseDownEvent and e.button == RightButton)
+  e = firstEvent("\e[<1;5;5M")
+  check("SGR value 1 -> MiddleButton",
+    e.kind == MouseDownEvent and e.button == MiddleButton)
+  e = firstEvent("\e[<16;5;5M")
+  check("button value 16 -> Ctrl", e.kind == MouseDownEvent and CtrlPressed in e.mods)
+  e = firstEvent("\e[<8;5;5M")
+  check("button value 8 -> Alt", e.kind == MouseDownEvent and AltPressed in e.mods)
+  e = firstEvent("\e[<32;5;5M")
+  check("motion -> MouseMove at the cell",
+    e.kind == MouseMoveEvent and e.x == 4 and e.y == 4)
+
+  ## Two presses at the same cell in quick succession form a double click;
+  ## the (1,1) cell is far enough from (4,4) to start a fresh run.
+  e = firstEvent("\e[<0;1;1M")
+  check("first press -> clicks = 1", e.kind == MouseDownEvent and e.clicks == 1)
+  e = firstEvent("\e[<0;1;1M")
+  check("second press -> double click", e.kind == MouseDownEvent and e.clicks == 2)
+
   ## A lone ESC (cut off mid-sequence) queues nothing yet -- nothing leaks.
+  ## This runs last: the ESC stays held in `escAccum` until the next byte, so a
+  ## later feed would be prefixed with the dangling ESC and misparse.
+  var ev: Event
   feedBytes(@[0x1B'u8])
-  check("lone ESC queues nothing", not pollEvent(e))
+  check("lone ESC queues nothing", not pollEvent(ev))
 
 # ---------------------------------------------------------------------------
-main():
+proc main() =
   colourTests()
   utf8Tests()
   renderTests()
   inputTests()
+  mouseTests()
 
   echo()
   echo(if failures == 0: "ALL PASS"
-       else: $(failures & " FAILURE(S)"))
+       else: $failures & " FAILURE(S)")
   if failures > 0: quit 1
+
+main()
