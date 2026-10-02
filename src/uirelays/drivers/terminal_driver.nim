@@ -361,10 +361,12 @@ proc drawText*(f: Font; x, y: int; text: string; fg, bg: Color): TextExtent =
   drawTextBody(f, x, y, text, over(fg), over(bg), TextExtent())
 
 proc drawMeasuredText*(f: Font; x, y: int; text: string;
-                       fg, bg: Color; size: TextExtent): TextExtent =
+                       fg, bg: Color; size: TextExtent) =
   ## The same body, for a caller that already measured: a shortcut, not a
-  ## second way to draw.
-  drawTextBody(f, x, y, text, over(fg), over(bg), size)
+  ## second way to draw. The public `drawText*` wrapper supplies the extent it
+  ## measured, so this driver just stamps the glyphs and reports nothing -- the
+  ## relay field `drawMeasuredText` is void on purpose.
+  discard drawTextBody(f, x, y, text, over(fg), over(bg), size)
 
 # ---------------------------------------------------------------------------
 # Window relays (Step 4).
