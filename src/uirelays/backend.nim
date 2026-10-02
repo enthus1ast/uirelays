@@ -16,7 +16,7 @@ when defined(terminal):
   import drivers/terminal_driver
   proc initBackend*() = initTerminalDriver()
 
-when (defined(features.uirelays.figDrawWindy) or defined(figDrawWindy)) and
+elif (defined(features.uirelays.figDrawWindy) or defined(figDrawWindy)) and
     (defined(features.uirelays.figDrawSiwin) or defined(figDrawSiwin)):
   {.error: "figDrawWindy and figDrawSiwin are mutually exclusive".}
 
