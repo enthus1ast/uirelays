@@ -754,9 +754,7 @@ proc drainInput(): bool =
   ## Read every pending byte, parse it into the event queue. Returns whether any
   ## byte was read. This is the single place input enters, so `waitEvent` and
   ## `sleep` keep pumping it (PLAN R8): the OS never sees a starving app.
-  var tv: Timeval
-  tv.tv_sec = 0
-  tv.tv_usec = 0
+  var tv = zeroTimeval()
   var fds: TFdSet
   FD_ZERO(fds)
   FD_SET(STDIN_FILENO, fds)
@@ -768,9 +766,7 @@ proc drainInput(): bool =
     var probe: TFdSet
     FD_ZERO(probe)
     FD_SET(STDIN_FILENO, probe)
-    var tv0: Timeval
-    tv0.tv_sec = 0
-    tv0.tv_usec = 0
+    var tv0 = zeroTimeval()
     if select(STDIN_FILENO + 1, probe.addr, nil, nil, tv0.addr) <= 0: break
     let r = read(STDIN_FILENO, unsafeAddr data[n], 1)
     if r > 0: inc n
