@@ -10,6 +10,8 @@
 ##   -d:gtk4    Force GTK4 backend
 ##   -d:terminal Force the full-screen terminal backend
 
+## The chain below is a single when/elif/else, so exactly one `initBackend` is
+## ever declared. `-d:terminal` is first and wins over every platform fallback.
 when defined(terminal):
   import drivers/terminal_driver
   proc initBackend*() = initTerminalDriver()
