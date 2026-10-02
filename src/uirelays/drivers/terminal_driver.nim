@@ -86,6 +86,11 @@ proc emit*(s: string) {.nimcall.} =
 
 outSink = emit
 
+proc zeroTimeval(): Timeval =
+  ## A zero-valued `Timeval` (used as a non-blocking poll timeout). The C
+  ## struct's fields are `distinct clong`, so a bare `0` will not bind.
+  Timeval(tv_sec: Time(0), tv_usec: Suseconds(0))
+
 # ---------------------------------------------------------------------------
 # Colour (Step 1) -- ported verbatim from focim/src/focim/ansi.nim, which is
 # exactly the 24-bit / 256-colour -> 16-colour reduction this needs.
