@@ -8,6 +8,11 @@
 ##   -d:sdl3    Force SDL3 backend
 ##   -d:sdl2    Force SDL2 backend
 ##   -d:gtk4    Force GTK4 backend
+##   -d:terminal Force the full-screen terminal backend
+
+when defined(terminal):
+  import drivers/terminal_driver
+  proc initBackend*() = initTerminalDriver()
 
 when (defined(features.uirelays.figDrawWindy) or defined(figDrawWindy)) and
     (defined(features.uirelays.figDrawSiwin) or defined(figDrawSiwin)):

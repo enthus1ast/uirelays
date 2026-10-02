@@ -912,6 +912,25 @@ proc initTerminalDriver*() =
   captured.setLen 0
   gFirstFrame = true
 
+  ## Populate the five global relays. Each field here points at a module-level
+  ## proc defined above; the default stubs (in screen.nim / input.nim) are left
+  ## for clipboard, which v1 does not talk to.
+  windowRelays = WindowRelays(
+    createWindow: createWindow, getWindowLayout: getWindowLayout,
+    refresh: refresh, saveState: saveState, restoreState: restoreState,
+    setClipRect: setClipRect, setCursor: setCursor,
+    setWindowTitle: setWindowTitle)
+  fontRelays = FontRelays(
+    openFont: openFont, closeFont: closeFont,
+    getFontMetrics: getFontMetrics, measureText: measureText,
+    drawText: drawText, drawMeasuredText: drawMeasuredText)
+  drawRelays = DrawRelays(
+    fillRect: fillRect, drawLine: drawLine, drawPoint: drawPoint)
+  inputRelays = InputRelays(
+    pollEvent: pollEvent, waitEvent: waitEvent,
+    getTicks: getTicks, sleep: sleep, shutdown: shutdown)
+  ## clipboardRelays keeps its no-op default (no xterm bracketed paste in v1).
+
   gPollEventImpl = proc (e: var Event; flags: set[InputFlag]): bool {.nimcall.} =
     if eventQueue.len > 0:
       e = eventQueue[0]
