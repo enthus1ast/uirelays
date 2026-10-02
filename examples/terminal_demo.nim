@@ -18,17 +18,20 @@
 ##              drop a point; consecutive points are joined with `drawLine`,
 ##              each segment a different colour (row 1 is a hue spectrum, row 5
 ##              a black-to-white ramp -- both show how deep the terminal is)
-##   1-5        activate the matching button from the keyboard
+##   1-6        activate the matching button from the keyboard
+##   Frame      switch between a solid colour frame and character frames
 ##   Cursor     cycle through every cursor shape this terminal can show
+##   i          toggle the `blitRGBA` image view (half blocks vs 1x1 cells)
 ##   c          clear the event log and the drawn line
 ##   Esc/Ctrl+Q quit
 
 import std/strutils
 import uirelays
-from uirelays/drivers/terminal_driver import TerminalCursor, setTerminalCursor
+from uirelays/drivers/terminal_driver import TerminalCursor, setTerminalCursor,
+  BlitStyle, blitStyle, blitHalfBlocks, blitCells
 
 const
-  ButtonCount = 5
+  ButtonCount = 6
   MaxLog = 200
   CursorShapes = [
     tcDefault, tcBlinkBlock, tcSteadyBlock,
@@ -39,6 +42,49 @@ type
   Button = object
     label: string
     r: Rect
+
+  FrameMode = enum
+    frameSolid, frameSingle, frameDouble, frameRounded, frameHeavy, frameAscii
+
+  BoxChars = object
+    tl, tr, bl, br, h, v: string
+
+const
+  boxSingle = BoxChars(tl: "┌", tr: "┐", bl: "└", br: "┘", h: "─", v: "│")
+  boxDouble = BoxChars(tl: "╔", tr: "╗", bl: "╚", br: "╝", h: "═", v: "║")
+  boxRounded = BoxChars(tl: "╭", tr: "╮", bl: "╰", br: "╯", h: "─", v: "│")
+  boxHeavy = BoxChars(tl: "┏", tr: "┓", bl: "┗", br: "┛", h: "━", v: "┃")
+  boxAscii = BoxChars(tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|")
+
+proc frameName(m: FrameMode): string =
+  case m
+  of frameSolid: "solid"
+  of frameSingle: "single"
+  of frameDouble: "double"
+  of frameRounded: "rounded"
+  of frameHeavy: "heavy"
+  of frameAscii: "ascii"
+
+proc drawBox(font: Font; r: Rect; b: BoxChars; fg, bg: Color) =
+  ## A character border, built only from `drawText` -- no driver help needed.
+  ## One `drawText` per edge, so it is a handful of calls per frame.
+  if r.w < 2 or r.h < 2: return
+  discard drawText(font, r.x, r.y, b.tl & repeat(b.h, r.w - 2) & b.tr, fg, bg)
+  discard drawText(font, r.x, r.y + r.h - 1,
+                   b.bl & repeat(b.h, r.w - 2) & b.br, fg, bg)
+  for y in r.y + 1 ..< r.y + r.h - 1:
+    discard drawText(font, r.x, y, b.v, fg, bg)
+    discard drawText(font, r.x + r.w - 1, y, b.v, fg, bg)
+
+proc drawPanel(font: Font; r: Rect; mode: FrameMode; fg, bg: Color) =
+  ## The switch: a solid colour frame, or a character frame.
+  case mode
+  of frameSolid: drawFrame(r, fg, 1)
+  of frameSingle: drawBox(font, r, boxSingle, fg, bg)
+  of frameDouble: drawBox(font, r, boxDouble, fg, bg)
+  of frameRounded: drawBox(font, r, boxRounded, fg, bg)
+  of frameHeavy: drawBox(font, r, boxHeavy, fg, bg)
+  of frameAscii: drawBox(font, r, boxAscii, fg, bg)
 
 proc centered(r: Rect; label: string): tuple[x, y: int] =
   ## Where a one-row label sits so it looks centred in the rectangle.
@@ -73,6 +119,25 @@ proc hueColor(h: float; s = 1.0; v = 1.0): Color =
   else: r = v; g = p; b = q
   color(uint8(r * 255.0 + 0.5), uint8(g * 255.0 + 0.5), uint8(b * 255.0 + 0.5))
 
+proc makeTestImage(w, h: int): seq[uint32] =
+  ## A shaded hue disc, in the 0x00RRGGBB the blit relay wants. The ring makes
+  ## the difference between half-block and one-pixel-per-cell obvious.
+  result = newSeq[uint32](w * h)
+  for y in 0 ..< h:
+    for x in 0 ..< w:
+      let u = float(x) / float(max(1, w - 1))
+      let v = float(y) / float(max(1, h - 1))
+      let dx = u - 0.5
+      let dy = v - 0.5
+      let r2 = dx * dx + dy * dy
+      var c = hueColor(u, 0.8, 0.35 + 0.65 * v)
+      if r2 > 0.20: c = color(18, 18, 28)
+      elif r2 > 0.155: c = color(235, 235, 245)
+      result[y * w + x] = (uint32(c.r) shl 16) or (uint32(c.g) shl 8) or uint32(c.b)
+
+proc pixelPtr(s: var seq[uint32]): ptr UncheckedArray[uint32] =
+  cast[ptr UncheckedArray[uint32]](addr s[0])
+
 proc keyLabel(e: Event): string =
   ## `KeyPageUp` -> `PageUp`, prefixed with the modifiers that came with it:
   ## `Ctrl+A`, `Shift+Delete`, `Alt+Up`, ...
@@ -96,9 +161,9 @@ proc drawArrow(x, y: int; body, tip: Color) =
     (0, 4), (1, 4),
   ]
   for p in Shape:
-    fillRect(rect(x + p[0], y + p[1], 1, 1), body)
+    drawPoint(x + p[0], y + p[1], body)
   ## A one-cell tip in the outline colour marks the exact hot spot.
-  fillRect(rect(x, y, 1, 1), tip)
+  drawPoint(x, y, tip)
 
 proc addLog(log: var seq[string]; line: string) =
   log.insert(line, 0)
@@ -111,6 +176,12 @@ proc main =
   var height = layout.height
   var fm = FontMetrics()
   let font = openFont("", layout.scaled(1), fm)
+  ## The terminal carries the style on the font handle: one variant per style,
+  ## `drawText` turns it into cell attributes.
+  let fontBold = styledFont(font, {FontStyle.bold})
+  let fontItalic = styledFont(font, {FontStyle.italics})
+  let fontUnderline = styledFont(font, {FontStyle.underline})
+  let fontStrike = styledFont(font, {FontStyle.strikethrough})
   setWindowTitle("uirelays terminal demo")
 
   let palette = [
@@ -139,6 +210,15 @@ proc main =
   var typed: seq[string] = @[]   ## typed codepoints (each event is one)
   var cursorIdx = 0              ## index into CursorShapes
   var lastCursorIdx = -1         ## last shape pushed to the terminal
+  var frameMode = frameSolid     ## solid frame or one of the character frames
+  var imageMode = false          ## the blitRGBA image view
+
+  ## One image rendered both ways: half blocks need 2 rows of pixels per cell,
+  ## one-per-cell needs as many pixel rows as cell rows.
+  const ImgW = 26
+  const ImgRows = 12
+  var imgHalf = makeTestImage(ImgW, ImgRows * 2)
+  var imgCells = makeTestImage(ImgW, ImgRows)
   var polyline: seq[Point] = @[] ## left clicks on empty space, joined by lines
   var buttons: array[ButtonCount, Button]
 
@@ -162,10 +242,14 @@ proc main =
       cursorIdx = (cursorIdx + 1) mod CursorShapes.len
       addLog(log, "Cursor -> " & cursorName(CursorShapes[cursorIdx]))
     of 3:
+      frameMode = (if frameMode == high(FrameMode): low(FrameMode)
+                   else: FrameMode(ord(frameMode) + 1))
+      addLog(log, "Frame -> " & frameName(frameMode))
+    of 4:
       log.setLen 0
       polyline.setLen 0
       addLog(log, "Log and line cleared")
-    of 4:
+    of 5:
       running = false
     else: discard
 
@@ -181,8 +265,9 @@ proc main =
     buttons[0].label = "Count"
     buttons[1].label = "Theme"
     buttons[2].label = "Cursor"
-    buttons[3].label = "Clear"
-    buttons[4].label = "Quit"
+    buttons[3].label = "Frame"
+    buttons[4].label = "Clear"
+    buttons[5].label = "Quit"
 
     # --- events ------------------------------------------------------------
     var e = Event()
@@ -235,7 +320,7 @@ proc main =
         of KeyQ:
           if CtrlPressed in e.mods: running = false
           else: addLog(log, "Key " & keyLabel(e))
-        of Key1 .. Key5:
+        of Key1 .. Key6:
           activate(ord(e.key) - ord(Key1))
         of KeyC:
           log.setLen 0
@@ -249,6 +334,8 @@ proc main =
             addLog(log, "Copied " & $copied.len & " bytes to clipboard")
           else:
             addLog(log, "Key " & keyLabel(e))
+        of KeyI:
+          imageMode = not imageMode
         else:
           addLog(log, "Key " & keyLabel(e))
       of TextInputEvent:
@@ -283,9 +370,19 @@ proc main =
       let last = float(width - 1)
       for x in 0 ..< width:
         let t = float(x) / last
-        fillRect(rect(x, 1, 1, 1), hueColor(t))
+        drawPoint(x, 1, hueColor(t))
         let g = uint8(t * 255.0 + 0.5)
-        fillRect(rect(x, 5, 1, 1), color(g, g, g))
+        drawPoint(x, 5, color(g, g, g))
+
+    # A legend of the text styles, drawn over the ramp. Each is the *same*
+    # `drawText` call with a differently styled handle.
+    block:
+      var sx = 1
+      sx += drawText(font, sx, 5, "regular ", fg, bg).w
+      sx += drawText(fontBold, sx, 5, "bold ", fg, bg).w
+      sx += drawText(fontItalic, sx, 5, "italic ", fg, bg).w
+      sx += drawText(fontUnderline, sx, 5, "underline ", fg, bg).w
+      discard drawText(fontStrike, sx, 5, "strike", fg, bg)
 
     # buttons
     for i in 0 ..< ButtonCount:
@@ -296,7 +393,7 @@ proc main =
                   elif isHot: panelAlt
                   else: panel)
       fillRect(b.r, fill)
-      drawFrame(b.r, palette[theme], 1)
+      drawPanel(font, b.r, frameMode, palette[theme], fill)
       let p = centered(b.r, b.label)
       discard drawText(font, p.x, p.y, b.label,
                        (if isDown: bg else: fg), fill)
@@ -329,7 +426,7 @@ proc main =
     if logY < helpY:
       let rh = helpY - logY
       fillRect(rect(0, logY, width, rh), panelAlt)
-      drawFrame(rect(0, logY, width, rh), border, 1)
+      drawPanel(font, rect(0, logY, width, rh), frameMode, border, panelAlt)
       discard drawText(font, 1, logY, " Events ", palette[theme], panelAlt)
       var row = 0
       for line in log:
@@ -342,8 +439,24 @@ proc main =
 
     # help line
     discard drawText(font, margin, helpY,
-                     "1-5 buttons  c clear  click empty: draw  Ctrl+Q quit",
+                     "1-6 buttons  c clear  click empty: draw  i image  Ctrl+Q quit",
                      muted, bg)
+
+    ## The same pixels through `blitRGBA` both ways, side by side -- `blitStyle`
+    ## is the terminal-wide knob, flipped per call so one frame shows both.
+    if imageMode:
+      let top = btnY + btnH + 1
+      let imgY = top + 1
+      let availH = max(1, helpY - imgY)
+      fillRect(rect(0, top, width, helpY - top), panelAlt)
+      discard drawText(font, 1, top, "half blocks (26x24px)", fg, panelAlt)
+      discard drawText(font, 29, top, "1x1 cells (26x12px)", fg, panelAlt)
+      blitStyle = blitHalfBlocks
+      discard blitRGBA(pixelPtr(imgHalf), ImgW, ImgRows * 2,
+                       rect(1, imgY, ImgW, availH))
+      blitStyle = blitCells
+      discard blitRGBA(pixelPtr(imgCells), ImgW, ImgRows,
+                       rect(29, imgY, ImgW, availH))
 
     # The `drawLine` polyline: segments between the dropped points, a marker at
     # each vertex, and a rubber band from the last point to the pointer. Drawn
@@ -356,7 +469,7 @@ proc main =
         drawLine(polyline[i - 1].x, polyline[i - 1].y,
                  polyline[i].x, polyline[i].y, hueColor(h))
       for p in polyline:
-        fillRect(rect(p.x, p.y, 1, 1), fg)
+        drawPoint(p.x, p.y, fg)
       if mouseSeen:
         let last = polyline[^1]
         drawLine(last.x, last.y, mouseX, mouseY, border)

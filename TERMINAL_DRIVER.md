@@ -52,9 +52,14 @@ seven shapes), clipboard write OSC 52.
 
 ## Relays
 
-All five groups are installed. Images are **not**: `loadImage`/`drawImage`/
-`imageSize`/`blitRGBA` are nil-safe no-ops. Clipboard: `putText` via OSC 52,
-`getText` returns `""`.
+All five groups are installed. Images are partly there: `blitRGBA` lands pixels
+the app produced, as half-blocks or one-per-cell (`blitStyle`);
+`loadImage`/`drawImage`/`imageSize` are nil-safe no-ops. Clipboard: `putText`
+via OSC 52, `getText` returns `""`.
+
+Text styles ride on the font handle: `styledFont(f, {FontStyle.underline})`
+(and `bold`/`italics`/`strikethrough`) makes `drawText` emit the matching SGR
+attribute. See `PR2.md` for why the style lives on the handle.
 
 ## Offscreen mode
 
@@ -70,7 +75,8 @@ to the `captured` string instead of a terminal. All unit tests run this way.
 
 ## Limitations
 
-- no image relay (would need Sixel/Kitty or a file decoder);
+- no image *decoder* (`loadImage`/`drawImage`); apps hand over finished pixels
+  with `blitRGBA` instead;
 - double-width glyphs (CJK, emoji) count as one cell (no `wcwidth`);
 - `Alt+<key>` is reported as `Esc` + text;
 - bracketed paste / modifyOtherKeys / Kitty keyboard not enabled.

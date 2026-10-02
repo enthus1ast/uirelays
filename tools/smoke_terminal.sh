@@ -52,8 +52,11 @@ echo "smoke: terminal_demo"
   --expect='Copied' \
   --expect='60x24' \
   --expect='typed: äöü' \
+  --expect='regular bold italic underline strike' \
   --expect-raw='\e[?1004h' \
   --expect-raw='\e]52;c;' \
+  --expect-raw='\e[4m' \
+  --expect-raw='\e[9m' \
   --expect-exit
 
 echo "smoke: terminal_demo colours"
@@ -76,15 +79,29 @@ echo "smoke: terminal_demo keys"
   --send='700:\e[<35;37;3M' \
   --send='750:\e[<0;37;3M' \
   --send='790:\e[<0;37;3m' \
-  --send='900:\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82' \
-  --send='1400:\x03' \
+  --send='850:\e[<35;45;3M' \
+  --send='900:\e[<0;45;3M' \
+  --send='940:\e[<0;45;3m' \
+  --send='1100:\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82' \
+  --send='1600:\x03' \
   --expect='Key Insert' \
   --expect='Key Delete' \
   --expect='Key End' \
   --expect='Key Home' \
   --expect='Cursor -> blinking block' \
+  --expect='Frame -> single' \
+  --expect='┌' \
   --expect-raw='\e[1 q' \
   --expect='typed: Привет' \
+  --expect-exit
+
+echo "smoke: terminal_demo image"
+.build/pty_smoke .build/terminal_demo --wait=1.2 \
+  --send='300:\x69' \
+  --send='900:\x03' \
+  --expect='half blocks (26x24px)' \
+  --expect='1x1 cells (26x12px)' \
+  --expect-raw='\xe2\x96\x80' \
   --expect-exit
 
 echo "smoke: terminal_demo draw"

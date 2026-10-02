@@ -50,6 +50,14 @@ proc c_pipe(fds: ptr array[0 .. 1, cint]): cint
 
 const MaxGlyphBytes* = 4        ## UTF-8 bytes one cell can hold
 
+## The attribute bits a `Cell` carries -- the SGR attributes a terminal can
+## show. `drawTextBody` sets them from the style of the font handle it is given.
+const
+  AttrBold      = 0x01'u16
+  AttrItalic    = 0x02'u16
+  AttrUnderline = 0x04'u16
+  AttrStrike    = 0x08'u16
+
 type
   Cell* = object
     ## One screen cell, kept in two buffers: `buf` (what this frame will show)
@@ -62,7 +70,7 @@ type
     glyph*: array[MaxGlyphBytes, char]
     glyphLen*: uint8
     fg*, bg*: Color
-    attr*: uint16      ## bit 0 = bold; the terminal's only easy flourish
+    attr*: uint16      ## AttrBold | AttrItalic | AttrUnderline | AttrStrike
 
   Utf8Decoder* = object
     ## State of the incremental UTF-8 decoder: how many more continuation bytes
@@ -336,14 +344,13 @@ proc utf8Encode*(cp: uint32; s: var array[4, char]): int =
 # honouring the clip rect, bounds-checked, so nothing writes off the surface.
 # ---------------------------------------------------------------------------
 
-proc makeCell(ch: char; fg, bg: Color; bold = false): Cell =
-  Cell(glyph: [ch, '\0', '\0', '\0'], glyphLen: 1,
-       fg: fg, bg: bg, attr: (if bold: 1'u16 else: 0'u16))
+proc makeCell(ch: char; fg, bg: Color; attr = 0'u16): Cell =
+  Cell(glyph: [ch, '\0', '\0', '\0'], glyphLen: 1, fg: fg, bg: bg, attr: attr)
 
 proc makeCellGlyph(s: string; start, n: int; fg, bg: Color;
-                   bold = false): Cell =
+                   attr = 0'u16): Cell =
   ## A cell holding the `n` bytes at `s[start]`: one whole UTF-8 codepoint.
-  result = Cell(fg: fg, bg: bg, attr: (if bold: 1'u16 else: 0'u16))
+  result = Cell(fg: fg, bg: bg, attr: attr)
   let m = min(n, MaxGlyphBytes)
   for k in 0 ..< m: result.glyph[k] = s[start + k]
   result.glyphLen = uint8(m)
@@ -421,24 +428,88 @@ proc drawLine*(x1, y1, x2, y2: int; color: Color) =
       err += dx
       cy += sy
 
-# images: left at the default stubs (0 / discard) -- out of scope by design.
+# ---------------------------------------------------------------------------
+# Images (blitRGBA): the escape hatch for pixels the app produced itself (a
+# decoder, a chart, a PDF page). A terminal cell can hold two stacked pixels as
+# the half-block `▀`, or one pixel as a solid cell.
+# ---------------------------------------------------------------------------
+
+type
+  BlitStyle* = enum
+    ## How `blitRGBA` packs pixels into cells. Pick per app; set `blitStyle`.
+    blitHalfBlocks   ## two pixel rows per cell: `▀`, fg = top, bg = bottom
+    blitCells        ## one pixel per cell, filled with the pixel's colour
+
+var blitStyle* = blitHalfBlocks
+
+proc rgbOf(p: uint32): Color {.inline.} =
+  ## `0x00RRGGBB` in host byte order to a `Color`.
+  color(uint8((p shr 16) and 0xFF'u32), uint8((p shr 8) and 0xFF'u32),
+        uint8(p and 0xFF'u32))
+
+proc blitHalfBlocks(pixels: ptr UncheckedArray[uint32]; w, h: int;
+                    dst: Rect): bool =
+  if pixels == nil or w <= 0 or h <= 0 or dst.w <= 0 or dst.h <= 0: return false
+  let cellRows = (h + 1) div 2
+  for cyi in 0 ..< min(cellRows, dst.h):
+    let r0 = cyi * 2
+    for col in 0 ..< min(w, dst.w):
+      let top = rgbOf(pixels[r0 * w + col])
+      let bot = (if r0 + 1 < h: rgbOf(pixels[(r0 + 1) * w + col]) else: top)
+      setCell(dst.x + col, dst.y + cyi, makeCellGlyph("▀", 0, 3, top, bot))
+  true
+
+proc blitCells(pixels: ptr UncheckedArray[uint32]; w, h: int;
+               dst: Rect): bool =
+  if pixels == nil or w <= 0 or h <= 0 or dst.w <= 0 or dst.h <= 0: return false
+  for row in 0 ..< min(h, dst.h):
+    for col in 0 ..< min(w, dst.w):
+      let c = rgbOf(pixels[row * w + col])
+      setCellColor(dst.x + col, dst.y + row, c, c)
+  true
+
+proc blitRGBA*(pixels: ptr UncheckedArray[uint32]; w, h: int;
+               dst: Rect): bool =
+  ## Put `w * h` finished `0x00RRGGBB` pixels on the cell grid at `dst`. The
+  ## terminal cannot scale, so `dst.w`/`dst.h` only clip; `blitStyle` decides
+  ## whether two pixel rows share a half-block cell or one pixel fills a cell.
+  ## Returns false only for an empty image or surface.
+  case blitStyle
+  of blitHalfBlocks: blitHalfBlocks(pixels, w, h, dst)
+  of blitCells: blitCells(pixels, w, h, dst)
 
 # ---------------------------------------------------------------------------
 # Font + text relays (Step 3). Font height is 1: a line is one cell row.
 # ---------------------------------------------------------------------------
 
+var
+  fontStyles: seq[FontStyles] = @[{}]   ## handle -> style; index 0 is `Font(0)`
+
+proc fontStyleOf(f: Font): FontStyles =
+  ## The style a `drawText` was opened with, read back at draw time.
+  if f.int > 0 and f.int < fontStyles.len: fontStyles[f.int] else: {}
+
+proc attrOf(style: FontStyles): uint16 =
+  if FontStyle.bold in style: result = result or AttrBold
+  if FontStyle.italics in style: result = result or AttrItalic
+  if FontStyle.underline in style: result = result or AttrUnderline
+  if FontStyle.strikethrough in style: result = result or AttrStrike
+
 proc openFont*(path: string; size: int; style: FontStyles;
                metrics: var FontMetrics): Font =
-  ## `size` and `path` are accepted but do not rasterise anything: the terminal
-  ## draws each stamped character with its own native font. Only the metrics
-  ## are written, and they obey the cell==pixel rule (one row, one cell tall).
+  ## `size` and `path` do not rasterise anything: the terminal draws each
+  ## stamped character with its own font. What the handle *does* carry is the
+  ## style, which `drawText` turns into cell attributes (bold, italic,
+  ## underline, strikethrough) -- the terminal's equivalent of a styled face.
   metrics = FontMetrics(ascent: 1, descent: 0, lineHeight: 1)
-  discard style
   discard path
   discard size
-  Font(1)
+  result = Font(fontStyles.len)
+  fontStyles.add style
 
-proc closeFont*(f: Font) = discard
+proc closeFont*(f: Font) =
+  ## Retire the handle; a later `openFont` gets a fresh one.
+  if f.int > 0 and f.int < fontStyles.len: fontStyles[f.int] = {}
 
 proc getFontMetrics*(f: Font): FontMetrics =
   ## Every font the driver offers is the same flat 1-row grid.
@@ -460,6 +531,7 @@ proc drawTextBody*(f: Font; x, y: int; text: string;
   ## *full* background of every cell in the run so a label drawn over a coloured
   ## box reads clean. Returns the same extent `measureText` would.
   let res = (if known.w > 0: known else: measureText(f, text))
+  let attr = attrOf(fontStyleOf(f))
   var cx = x
   ## `setCell` bounds- and clip-checks every cell itself, so the run stays
   ## correct even when it starts at a negative x. Decode by codepoint, not by
@@ -468,7 +540,7 @@ proc drawTextBody*(f: Font; x, y: int; text: string;
   var i = 0
   while i < text.len:
     let n = glyphLenAt(text, i)
-    setCell(cx, y, makeCellGlyph(text, i, n, fg, bg))
+    setCell(cx, y, makeCellGlyph(text, i, n, fg, bg, attr))
     inc cx
     i += n
   res
@@ -639,19 +711,35 @@ proc setWindowTitle*(title: string) =
 
 proc emitCell(sb: var string; x, y: int; cell: Cell;
               outCol, outRow: var int; outFg, outBg: var Color;
-              outBold, outValid: var bool) =
+              outAttr: var uint16; outValid: var bool) =
   if x != outCol or y != outRow:
     sb.add "\e[" & $((y + 1)) & ";" & $((x + 1)) & "H"
     outCol = x
     outRow = y
     ## Moving the cursor leaves the SGR attributes untouched, so the tracked
-    ## colours and bold state stay valid -- nothing is forced here. (The old
+    ## colours and attributes stay valid -- nothing is forced here. (The old
     ## code reset them to white, which suppressed the colour escape whenever
     ## the next cell happened to be white, and lost track of bold.)
-  if (cell.attr and 1'u16) != 0'u16 and (not outValid or not outBold):
-    sb.add "\e[1m"; outBold = true
-  elif (cell.attr and 1'u16) == 0'u16 and outValid and outBold:
-    sb.add "\e[22m"; outBold = false
+  if not outValid:
+    ## Frame start: the previous frame ended with `\e[0m`, so only the
+    ## attributes that are on need emitting.
+    if (cell.attr and AttrBold) != 0: sb.add "\e[1m"
+    if (cell.attr and AttrItalic) != 0: sb.add "\e[3m"
+    if (cell.attr and AttrUnderline) != 0: sb.add "\e[4m"
+    if (cell.attr and AttrStrike) != 0: sb.add "\e[9m"
+  elif cell.attr != outAttr:
+    ## Emit only the bits that changed: the resets first, then the sets.
+    let off = outAttr and not cell.attr
+    let on = cell.attr and not outAttr
+    if (off and AttrBold) != 0: sb.add "\e[22m"
+    if (off and AttrItalic) != 0: sb.add "\e[23m"
+    if (off and AttrUnderline) != 0: sb.add "\e[24m"
+    if (off and AttrStrike) != 0: sb.add "\e[29m"
+    if (on and AttrBold) != 0: sb.add "\e[1m"
+    if (on and AttrItalic) != 0: sb.add "\e[3m"
+    if (on and AttrUnderline) != 0: sb.add "\e[4m"
+    if (on and AttrStrike) != 0: sb.add "\e[9m"
+  outAttr = cell.attr
   if not outValid or cell.fg != outFg:
     sb.add "\e[" & termColor(cell.fg, false) & "m"; outFg = cell.fg
   if not outValid or cell.bg != outBg:
@@ -682,7 +770,7 @@ proc refresh*() =
   var outRow = -1
   var outFg = Color(r: 255, g: 255, b: 255, a: 255)
   var outBg = Color(r: 255, g: 255, b: 255, a: 255)
-  var outBold = false
+  var outAttr = 0'u16
   var outValid = false
   var capped = false
   for y in 0 ..< rows:
@@ -692,7 +780,7 @@ proc refresh*() =
         if not full and changed >= MaxChangedFrame:
           capped = true
           break
-        emitCell(sb, x, y, buf[idx], outCol, outRow, outFg, outBg, outBold,
+        emitCell(sb, x, y, buf[idx], outCol, outRow, outFg, outBg, outAttr,
                  outValid)
         inc changed
     if capped: break
@@ -1248,6 +1336,7 @@ proc initTerminalDriver*() =
   captured.setLen 0
   escAccum.setLen 0
   utf8State = newUtf8Decoder()
+  fontStyles = @[{}]
   gFocus = -1'i8
   gFirstFrame = true
 
@@ -1264,7 +1353,8 @@ proc initTerminalDriver*() =
     getFontMetrics: getFontMetrics, measureText: measureText,
     drawText: drawText, drawMeasuredText: drawMeasuredText)
   drawRelays = DrawRelays(
-    fillRect: fillRect, drawLine: drawLine, drawPoint: drawPoint)
+    fillRect: fillRect, drawLine: drawLine, drawPoint: drawPoint,
+    blitRGBA: blitRGBA)
   inputRelays = InputRelays(
     pollEvent: pollEvent, waitEvent: waitEvent,
     getTicks: getTicks, sleep: sleep, shutdown: shutdown)

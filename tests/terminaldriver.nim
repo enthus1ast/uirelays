@@ -16,7 +16,8 @@ import uirelays
 ## ambiguous with the `uirelays` wrappers.
 from uirelays/drivers/terminal_driver import
   captured, feedBytes, termColor, newUtf8Decoder, decodeByte, utf8Encode,
-  drAscii, drCodepoint, drPartial, drError, setTerminalCursor, tcSteadyUnderline
+  drAscii, drCodepoint, drPartial, drError, setTerminalCursor, tcSteadyUnderline,
+  blitStyle, blitHalfBlocks, blitCells
 
 ## Force offscreen mode and a fixed 16-colour palette so the assertions below
 ## are deterministic no matter where this is run (CI has no TTY; a developer's
@@ -176,6 +177,89 @@ proc colorModeTests =
   putEnv("UIRELAYS_TERMINAL_COLORS", "16")
   discard createWindow(40, 10)
   check("16: red is SGR 31", termColor(color(205, 0, 0), false) == "31")
+
+# ---------------------------------------------------------------------------
+# Text styles carried by the font handle.
+# ---------------------------------------------------------------------------
+proc styleTests =
+  echo "text styles:"
+  var fm = FontMetrics()
+  let regular = openFont("", 1, fm)
+  let bold = styledFont(regular, {FontStyle.bold})
+  let italic = styledFont(regular, {FontStyle.italics})
+  let underlined = styledFont(regular, {FontStyle.underline})
+  let struck = styledFont(regular, {FontStyle.strikethrough})
+
+  check("styledFont returns a distinct handle", bold.int != regular.int)
+  check("each style gets its own handle",
+    italic.int != bold.int and underlined.int != italic.int and
+    struck.int != underlined.int)
+
+  proc drawn(f: Font): string =
+    captured.setLen 0
+    fillRect(rect(0, 0, 40, 10), color(0, 0, 0))
+    refresh()
+    captured.setLen 0
+    discard drawText(f, 0, 0, "X", color(255, 255, 255), color(0, 0, 0))
+    refresh()
+    result = captured
+
+  check("bold emits SGR 1", drawn(bold).contains("\e[1m"))
+  check("italic emits SGR 3", drawn(italic).contains("\e[3m"))
+  check("underline emits SGR 4", drawn(underlined).contains("\e[4m"))
+  check("strikethrough emits SGR 9", drawn(struck).contains("\e[9m"))
+  let plain = drawn(regular)
+  check("the regular face emits no attribute",
+    not plain.contains("\e[1m") and not plain.contains("\e[3m") and
+    not plain.contains("\e[4m") and not plain.contains("\e[9m"))
+
+  ## A regular run right after a bold one must reset the attribute.
+  captured.setLen 0
+  fillRect(rect(0, 0, 40, 10), color(0, 0, 0))
+  refresh()
+  captured.setLen 0
+  discard drawText(bold, 0, 0, "B", color(255, 255, 255), color(0, 0, 0))
+  discard drawText(regular, 1, 0, "r", color(255, 255, 255), color(0, 0, 0))
+  refresh()
+  check("bold then regular emits the reset", captured.contains("\e[22m"))
+
+  closeFont(regular)
+
+# ---------------------------------------------------------------------------
+# blitRGBA: pixels to cells, half-block or one-per-cell.
+# ---------------------------------------------------------------------------
+proc blitTests =
+  echo "blitRGBA:"
+  var img = newSeq[uint32](4 * 4)
+  for i in 0 ..< img.len: img[i] = 0x00FF0000'u32   # red
+  let px = cast[ptr UncheckedArray[uint32]](addr img[0])
+
+  captured.setLen 0
+  fillRect(rect(0, 0, 40, 10), color(0, 0, 0))
+  refresh()
+  captured.setLen 0
+  blitStyle = blitHalfBlocks
+  check("half blocks: returns true", blitRGBA(px, 4, 4, rect(0, 0, 4, 4)))
+  refresh()
+  check("half blocks: 4x4 pixels fill 8 cells", captured.count("H") == 8)
+  check("half blocks: emits the upper-half glyph",
+    captured.contains("\xE2\x96\x80"))
+
+  captured.setLen 0
+  fillRect(rect(0, 0, 40, 10), color(0, 0, 0))
+  refresh()
+  captured.setLen 0
+  blitStyle = blitCells
+  check("cells: returns true", blitRGBA(px, 4, 4, rect(0, 0, 4, 4)))
+  refresh()
+  check("cells: 4x4 pixels fill 16 cells", captured.count("H") == 16)
+  check("cells: no half-block glyph", not captured.contains("\xE2\x96\x80"))
+
+  check("nil pixels -> false", not blitRGBA(nil, 4, 4, rect(0, 0, 4, 4)))
+  check("empty size -> false",
+    not blitRGBA(px, 0, 4, rect(0, 0, 4, 4)) and
+    not blitRGBA(px, 4, 4, rect(0, 0, 0, 0)))
+  blitStyle = blitHalfBlocks
 
 # ---------------------------------------------------------------------------
 # Input (PLAN: push synthetic byte strings in, check the events out).
@@ -529,6 +613,8 @@ proc main() =
   utf8Tests()
   renderTests()
   colorModeTests()
+  styleTests()
+  blitTests()
   inputTests()
   unicodeTests()
   keyModTests()

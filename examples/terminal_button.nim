@@ -22,7 +22,7 @@ proc drawPointer(x, y: int; color: Color) =
     (0, 3), (1, 3), (2, 3), (3, 3),
   ]
   for p in Shape:
-    fillRect(rect(x + p[0], y + p[1], 1, 1), color)
+    drawPoint(x + p[0], y + p[1], color)
 
 proc main =
   let layout = createWindow(60, 20)

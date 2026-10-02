@@ -11,13 +11,15 @@ type
   Image* = distinct int   ## opaque handle; 0 = invalid
 
   FontStyle* {.pure.} = enum
-    bold, italics
+    bold, italics, underline, strikethrough
   FontStyles* = set[FontStyle]
-    ## What a font is asked to look like beyond its size. `{}` is the upright
-    ## regular face every driver can produce; the rest are a wish. A family
-    ## without a bold or an italic face -- and a driver that cannot ask for one
-    ## -- draws the regular face instead, so styled text is at worst plain,
-    ## never missing.
+    ## Text-style hints asked of a font, beyond its size. `bold` and `italics`
+    ## are faces (a different cut, or one the driver synthesises); `underline`
+    ## and `strikethrough` are decorations a driver applies while drawing. They
+    ## are carried on the font handle so `drawText` needs no style parameter,
+    ## and every one is a wish: a driver that cannot produce it draws the plain
+    ## face/run instead, so styled text is at worst unstyled, never missing.
+    ## `{}` is the upright regular face every driver can produce.
 
   TextExtent* = object
     w*, h*: int
@@ -223,16 +225,18 @@ type
     base: Font
     path: string
     size: int
-    variants: array[3, Font]  ## {bold}, {italics}, {bold, italics}
+    variants: array[16, Font]  ## one per combination of the four style bits
 
 var openedFonts: seq[StyledSlot]
   ## Only the upright fonts an app opened itself; the variants hang off them
   ## and are closed with them, so an app never has to know they exist.
 
 proc variantIndex(style: FontStyles): int {.inline.} =
-  ## `{bold}` -> 0, `{italics}` -> 1, `{bold, italics}` -> 2.
-  result = (if FontStyle.bold in style: 1 else: 0) +
-           (if FontStyle.italics in style: 2 else: 0) - 1
+  ## One bit per style, so the four styles give sixteen cache slots.
+  if FontStyle.bold in style: result = result or 1
+  if FontStyle.italics in style: result = result or 2
+  if FontStyle.underline in style: result = result or 4
+  if FontStyle.strikethrough in style: result = result or 8
 
 proc openFont*(path: string; size: int; metrics: var FontMetrics;
                style: FontStyles = {}): Font =
