@@ -56,6 +56,18 @@ echo "smoke: terminal_demo"
   --expect-raw='\e]52;c;' \
   --expect-exit
 
+echo "smoke: terminal_demo draw"
+.build/pty_smoke .build/terminal_demo --wait=1.8 \
+  --send='300:\e[<35;10;7M' \
+  --send='450:\e[<0;10;7M' --send='490:\e[<0;10;7m' \
+  --send='650:\e[<35;30;7M' \
+  --send='800:\e[<0;30;7M' --send='840:\e[<0;30;7m' \
+  --send='1000:\e[<35;50;8M' \
+  --send='1400:\x03' \
+  --expect='MouseDown' \
+  --expect='click empty: draw' \
+  --expect-exit
+
 echo "smoke: terminal_demo clicks"
 .build/pty_smoke .build/terminal_demo --wait=2.0 \
   --send='200:\e[<35;5;5M' \

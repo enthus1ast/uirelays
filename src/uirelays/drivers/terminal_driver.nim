@@ -342,8 +342,15 @@ proc drawLine*(x1, y1, x2, y2: int; color: Color) =
   let dy = -abs(y2 - y1)
   var sx = (if x1 < x2: 1 else: -1)
   var sy = (if y1 < y2: 1 else: -1)
-  var err = (dx + dy) div 2
-  var cx, cy = x1
+  ## The classic all-octant Bresenham initialises the error to `dx + dy`. The
+  ## old `(dx + dy) div 2` halved it, which broke the decision thresholds for
+  ## axis-aligned lines: a horizontal or vertical line stepped off the axis on
+  ## the first cell and its endpoint was never reached, so the loop never
+  ## terminated. Every `drawLine` border in the terminal backend hung on it.
+  var err = dx + dy
+  ## `var cx, cy = x1` would set *both* to `x1`; the y start is `y1`.
+  var cx = x1
+  var cy = y1
   while true:
     setCellColor(cx, cy, c, c)
     if cx == x2 and cy == y2: break

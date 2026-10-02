@@ -114,15 +114,37 @@ proc renderTests =
   check("measureText counts 'äöü' as three columns",
     measureText(font, "äöü").w == 3)
 
-  ## drawLine paints one cell per step; each new x forces a cursor move, so the
-  ## five-cell line below yields exactly five `...H` sequences.
+  ## drawLine must terminate and reach its endpoint for axis-aligned lines at
+  ## any offset -- the origin masked both the halved error and the cx/cy
+  ## initialisation bug.
   captured.setLen 0
   fillRect(rect(0, 0, 40, 10), color(30, 30, 46))
   refresh()
   captured.setLen 0
-  drawLine(0, 0, 4, 0, color(205, 0, 0))
+  drawLine(2, 1, 6, 1, color(205, 0, 0))          # horizontal
   refresh()
-  check("drawLine paints five cells", captured.count("H") == 5)
+  check("drawLine paints a 5-cell horizontal run", captured.count("H") == 5)
+  captured.setLen 0
+  fillRect(rect(0, 0, 40, 10), color(30, 30, 46))
+  refresh()
+  captured.setLen 0
+  drawLine(2, 1, 2, 4, color(205, 0, 0))          # vertical
+  refresh()
+  check("drawLine paints a 4-cell vertical run", captured.count("H") == 4)
+  captured.setLen 0
+  fillRect(rect(0, 0, 40, 10), color(30, 30, 46))
+  refresh()
+  captured.setLen 0
+  drawLine(5, 5, 5, 5, color(205, 0, 0))          # a single cell
+  refresh()
+  check("drawLine of one point paints one cell", captured.count("H") == 1)
+  captured.setLen 0
+  fillRect(rect(0, 0, 40, 10), color(30, 30, 46))
+  refresh()
+  captured.setLen 0
+  drawLine(2, 1, 5, 4, color(205, 0, 0))          # diagonal
+  refresh()
+  check("drawLine paints a 4-cell diagonal", captured.count("H") == 4)
   check("drawLine uses the line colour", captured.contains("\e[31m"))
   closeFont(font)
 
