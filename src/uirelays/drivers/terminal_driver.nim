@@ -25,7 +25,8 @@ import uirelays/[coords, screen, input]
 import posix/termios
 import posix/posix
 import std/terminal   # hideCursor, showCursor, setCursorPos
-import std/times       # cpuTime, epochTime
+import std/times       # epochTime
+import std/monotimes   # getMonoTime (wall-clock monotonic ticks)
 import std/os          # getEnv
 import std/strutils    # contains
 import std/base64      # clipboard OSC 52
@@ -1254,8 +1255,11 @@ proc waitEvent*(e: var Event; timeoutMs: int = -1;
                 flags: set[InputFlag] = {}): bool =
   gWaitEventImpl(e, timeoutMs, flags)
 proc getTicks*(): int =
-  ## Monotonic milliseconds; `cpuTime` is monotonic for this process.
-  int(cpuTime() * 1000.0)
+  ## Monotonic milliseconds, wall clock. It used to be `cpuTime`, which is CPU
+  ## seconds: a frame's `sleep(16)` then measured almost nothing while the app
+  ## was idle in `select`, so the timeout never elapsed and a quitting app could
+  ## sit in its last `sleep` forever. `MonoTime` is a monotonic wall clock.
+  int(getMonoTime().ticks div 1_000_000)
 proc sleep*(ms: int) =
   ## Sleep, but pump input the whole time (R8): a sleeping terminal app must
   ## still see the user press a key.

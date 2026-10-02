@@ -9,7 +9,7 @@
 ## Run:
 ##   nim c -r tests/terminaldriver.nim -d:terminal --path:src
 
-import std/[os, strutils]                # getEnv / putEnv, contains
+import std/[os, strutils, times]                # getEnv / putEnv, contains, epochTime
 import uirelays
 ## Import only the driver's own symbols; a plain `import` of the driver also
 ## brings `fillRect`, `refresh`, `createWindow`, ... into scope and makes them
@@ -260,6 +260,63 @@ proc blitTests =
     not blitRGBA(px, 0, 4, rect(0, 0, 4, 4)) and
     not blitRGBA(px, 4, 4, rect(0, 0, 0, 0)))
   blitStyle = blitHalfBlocks
+
+# ---------------------------------------------------------------------------
+# Application units: the wrappers scale, relays and drivers see driver coords.
+# ---------------------------------------------------------------------------
+proc unitSizeTests =
+  echo "unit size:"
+  var fm = FontMetrics()
+  setUnitSize(2, 3)
+  let font = openFont("", 1, fm)
+  var e: Event
+
+  let layout = createWindow(10, 4)
+  check("the window request scales to driver cells",
+    getWindowLayout().width == 10 and getWindowLayout().height == 4)
+  check("the returned layout is in application units",
+    layout.width == 10 and layout.height == 4)
+
+  captured.setLen 0
+  fillRect(rect(0, 0, 10, 4), color(0, 0, 0))
+  refresh()
+  captured.setLen 0
+  fillRect(rect(1, 1, 2, 2), color(205, 0, 0))   # app units
+  refresh()
+  check("a 2x2 app rect fills 4x6 driver cells", captured.count("H") == 24)
+
+  captured.setLen 0
+  fillRect(rect(0, 0, 10, 4), color(0, 0, 0))
+  refresh()
+  captured.setLen 0
+  discard drawText(font, 1, 1, "X", color(255, 255, 255), color(0, 0, 0))
+  refresh()
+  check("drawText at app (1,1) lands at driver (2,3)",
+    captured.contains("\e[4;3H"))
+
+  ## Mouse coordinates come back in application units.
+  feedBytes(@[0x1B'u8, ord('[').uint8, ord('<').uint8, ord('0').uint8,
+              ord(';').uint8, ord('5').uint8, ord(';').uint8, ord('7').uint8,
+              ord('M').uint8])
+  check("mouse unscales to app units",
+    pollEvent(e) and e.kind == MouseDownEvent and e.x == 2 and e.y == 2)
+
+  closeFont(font)
+  setUnitSize(1, 1)
+
+# ---------------------------------------------------------------------------
+# getTicks must be a wall clock; it was CPU time, which made `sleep`'s timeout
+# never elapse while the app idled in `select`.
+# ---------------------------------------------------------------------------
+proc timingTests =
+  echo "timing:"
+  let t0 = getTicks()
+  let w0 = epochTime()
+  os.sleep(80)                        # a real wall sleep, not the driver's
+  let dt = getTicks() - t0
+  let dw = int((epochTime() - w0) * 1000.0)
+  check("getTicks tracks the wall clock",
+    dt >= 60 and abs(dt - dw) < 60)
 
 # ---------------------------------------------------------------------------
 # Input (PLAN: push synthetic byte strings in, check the events out).
@@ -615,6 +672,8 @@ proc main() =
   colorModeTests()
   styleTests()
   blitTests()
+  unitSizeTests()
+  timingTests()
   inputTests()
   unicodeTests()
   keyModTests()

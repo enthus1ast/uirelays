@@ -21,6 +21,7 @@ mkdir -p .build
 nim c --hints:off -o:.build/pty_smoke tools/pty_smoke.nim
 nim c --hints:off --path:src -d:terminal -o:.build/terminal_demo examples/terminal_demo.nim
 nim c --hints:off --path:src -d:terminal -o:.build/terminal_button examples/terminal_button.nim
+nim c --hints:off --path:src -d:terminal -o:.build/terminal_first examples/terminal_first.nim
 
 echo "smoke: terminal_demo"
 .build/pty_smoke .build/terminal_demo --wait=2.5 \
@@ -133,6 +134,14 @@ echo "smoke: terminal_demo clicks"
   --send='1500:\x03' \
   --expect='double-click' \
   --expect='triple-click' \
+  --expect-exit
+
+echo "smoke: terminal_first"
+.build/pty_smoke .build/terminal_first --wait=1.0 \
+  --send='600:\x1bq' \
+  --expect='terminal-first demo' \
+  --expect='one layout, 1x1 per cell' \
+  --expect='Esc or Ctrl+Q quit' \
   --expect-exit
 
 echo "smoke: terminal_button"
