@@ -83,6 +83,7 @@ proc main =
   var hovered = -1
   var pressed = -1
   var log: seq[string] = @[]
+  var typed: seq[string] = @[]   ## typed codepoints (each event is one)
   var buttons: array[ButtonCount, Button]
 
   addLog(log, "Ready -- move the mouse, click a button, scroll, type.")
@@ -168,6 +169,15 @@ proc main =
           addLog(log, "Log cleared")
         else:
           addLog(log, "Key " & $e.key)
+      of TextInputEvent:
+        ## One codepoint per event, already UTF-8. Keep the last 24 as whole
+        ## strings so a multi-byte character is never cut in half.
+        var cp = ""
+        for c in e.text:
+          if c == '\0': break
+          cp.add c
+        typed.add cp
+        if typed.len > 24: typed.delete(0)
       else: discard
 
     # --- draw --------------------------------------------------------------
@@ -207,6 +217,14 @@ proc main =
       status &= "  (move the mouse to show the pointer)"
     if status.len < width - 1:
       discard drawText(font, margin, btnY + btnH + 2, status, muted, bg)
+    ## Show what has been typed, umlauts included (one drawText writes each
+    ## codepoint's whole UTF-8 sequence into one cell). Skip it rather than cut
+    ## a glyph in half when the line does not fit.
+    if btnY + btnH + 3 < height - 1:
+      var typedStr = "typed: "
+      for cp in typed: typedStr.add cp
+      if typedStr.len <= width - 2:
+        discard drawText(font, margin, btnY + btnH + 3, typedStr, fg, bg)
 
     # event log
     let helpY = height - 1

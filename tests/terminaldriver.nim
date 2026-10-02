@@ -96,6 +96,23 @@ proc renderTests =
   discard drawText(font, 1, 1, "Hi", color(255, 255, 255), color(30, 30, 46))
   refresh()
   check("drawText stamped glyphs into the buffer", captured.contains("Hi"))
+
+  ## Non-ASCII is one codepoint per cell: measureText counts codepoints and the
+  ## emitted glyph is the whole UTF-8 sequence, not one byte per cell.
+  check("measureText counts 'ä' as one column", measureText(font, "ä").w == 1)
+  check("measureText counts 'grün' as four columns",
+    measureText(font, "grün").w == 4)
+  captured.setLen 0
+  fillRect(rect(0, 0, 40, 10), color(30, 30, 46))
+  discard drawText(font, 0, 0, "äöü", color(255, 255, 255), color(30, 30, 46))
+  refresh()
+  ## Each glyph's bytes are contiguous because they come from one cell; two
+  ## separate cells would have a cursor-position escape between them.
+  check("drawn 'ä' emits both UTF-8 bytes", captured.contains("\xC3\xA4"))
+  check("drawn 'ö' emits both UTF-8 bytes", captured.contains("\xC3\xB6"))
+  check("drawn 'ü' emits both UTF-8 bytes", captured.contains("\xC3\xBC"))
+  check("measureText counts 'äöü' as three columns",
+    measureText(font, "äöü").w == 3)
   closeFont(font)
 
 # ---------------------------------------------------------------------------
@@ -197,11 +214,59 @@ proc mouseTests =
   check("lone ESC queues nothing", not pollEvent(ev))
 
 # ---------------------------------------------------------------------------
+# Non-ASCII input: multi-byte UTF-8, split across reads, and error recovery.
+# ---------------------------------------------------------------------------
+proc unicodeTests =
+  echo "unicode input:"
+  var e = Event()
+
+  ## 'ä' = C3 A4, in one read.
+  feedBytes(@[0xC3'u8, 0xA4'u8])
+  check("'ä' is one TextInput",
+    pollEvent(e) and e.kind == TextInputEvent and
+    e.text[0].uint8 == 0xC3 and e.text[1].uint8 == 0xA4)
+
+  ## The same umlaut split across two reads: the decoder has to persist.
+  feedBytes(@[0xC3'u8])
+  check("split lead queues nothing", not pollEvent(e))
+  feedBytes(@[0xA4'u8])
+  check("split 'ä' completes across reads",
+    pollEvent(e) and e.kind == TextInputEvent and
+    e.text[0].uint8 == 0xC3 and e.text[1].uint8 == 0xA4)
+
+  ## '€' = E2 82 AC (three bytes, one column).
+  feedBytes(@[0xE2'u8, 0x82'u8, 0xAC'u8])
+  check("'€' is one TextInput",
+    pollEvent(e) and e.kind == TextInputEvent and
+    e.text[0].uint8 == 0xE2 and e.text[1].uint8 == 0x82 and e.text[2].uint8 == 0xAC)
+
+  ## An invalid lead byte becomes U+FFFD, and the next ASCII byte still arrives.
+  feedBytes(@[0xFF'u8, ord('x').uint8])
+  check("bad lead -> replacement char",
+    pollEvent(e) and e.kind == TextInputEvent and
+    e.text[0].uint8 == 0xEF and e.text[1].uint8 == 0xBF and e.text[2].uint8 == 0xBD)
+  check("byte after a bad lead is reprocessed",
+    pollEvent(e) and e.kind == KeyDownEvent and e.key == KeyX)
+  discard pollEvent(e)   # KeyUp X
+  discard pollEvent(e)   # TextInput 'x'
+
+  ## A bad continuation drops the half-sequence but reprocesses the byte, so a
+  ## lead byte that follows a broken one is not swallowed.
+  feedBytes(@[0xC3'u8, ord('A').uint8])
+  check("bad continuation -> replacement char",
+    pollEvent(e) and e.kind == TextInputEvent and e.text[0].uint8 == 0xEF)
+  check("byte after a bad continuation is reprocessed",
+    pollEvent(e) and e.kind == KeyDownEvent and e.key == KeyA)
+  discard pollEvent(e)
+  discard pollEvent(e)
+
+# ---------------------------------------------------------------------------
 proc main() =
   colourTests()
   utf8Tests()
   renderTests()
   inputTests()
+  unicodeTests()
   mouseTests()
 
   echo()

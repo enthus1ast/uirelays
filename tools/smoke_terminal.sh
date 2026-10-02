@@ -31,13 +31,15 @@ echo "smoke: terminal_demo"
   --send='850:\e[<66;3;3M' \
   --resize='1000:60x20' \
   --send='1200:\e[<35;40;12M' \
-  --send='1500:\x03' \
+  --send='1300:\xc3\xa4\xc3\xb6\xc3\xbc' \
+  --send='1600:\x03' \
   --expect='uirelays :: terminal demo' \
   --expect='Count -> 1' \
   --expect='Clicks: 1' \
   --expect='Wheel y=1' \
   --expect='Wheel x=1' \
   --expect='60x20' \
+  --expect='typed: äöü' \
   --expect-exit
 
 echo "smoke: terminal_button"

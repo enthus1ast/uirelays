@@ -47,13 +47,19 @@ proc c_pipe(fds: ptr array[0 .. 1, cint]): cint
 # The cell, and the module-level state that one live surface keeps.
 # ---------------------------------------------------------------------------
 
+const MaxGlyphBytes* = 4        ## UTF-8 bytes one cell can hold
+
 type
   Cell* = object
     ## One screen cell, kept in two buffers: `buf` (what this frame will show)
-    ## and `lastBuf` (what the previous frame showed, to diff against). The
-    ## colour fields are what the *app* asked for (already composited for
+    ## and `lastBuf` (what the previous frame showed, to diff against). `glyph`
+    ## is the whole UTF-8 sequence the terminal should draw (1-4 bytes) and
+    ## `glyphLen` how many are valid: keeping a multi-byte codepoint together in
+    ## one cell is what makes an umlaut one column instead of two broken bytes.
+    ## The colour fields are what the *app* asked for (already composited for
     ## alpha), which is also exactly what the diff needs to compare.
-    ch*: char
+    glyph*: array[MaxGlyphBytes, char]
+    glyphLen*: uint8
     fg*, bg*: Color
     attr*: uint16      ## bit 0 = bold; the terminal's only easy flourish
 
@@ -89,6 +95,7 @@ var
   sigByte: uint8 = 0            ## the byte the signal handlers write
   curMods: set[Modifier]
   escAccum: string              ## an escape sequence cut off mid-way, held
+  utf8State: Utf8Decoder        ## a UTF-8 codepoint cut off mid-way, held
   eventQueue: seq[Event]
   lastClickTick = 0             ## ms of the previous press, for click runs
   lastClickX, lastClickY = 0
@@ -269,7 +276,27 @@ proc utf8Encode*(cp: uint32; s: var array[4, char]): int =
 # ---------------------------------------------------------------------------
 
 proc makeCell(ch: char; fg, bg: Color; bold = false): Cell =
-  Cell(ch: ch, fg: fg, bg: bg, attr: (if bold: 1'u16 else: 0'u16))
+  Cell(glyph: [ch, '\0', '\0', '\0'], glyphLen: 1,
+       fg: fg, bg: bg, attr: (if bold: 1'u16 else: 0'u16))
+
+proc makeCellGlyph(s: string; start, n: int; fg, bg: Color;
+                   bold = false): Cell =
+  ## A cell holding the `n` bytes at `s[start]`: one whole UTF-8 codepoint.
+  result = Cell(fg: fg, bg: bg, attr: (if bold: 1'u16 else: 0'u16))
+  let m = min(n, MaxGlyphBytes)
+  for k in 0 ..< m: result.glyph[k] = s[start + k]
+  result.glyphLen = uint8(m)
+
+proc glyphLenAt(s: string; i: int): int =
+  ## Byte length of the UTF-8 codepoint starting at `s[i]`; 1 for ASCII or for
+  ## a malformed sequence, so a bad byte still occupies exactly one cell.
+  let b = s[i].uint8
+  let k = leadLen(b)
+  if k < 2: return 1
+  if i + k > s.len: return 1
+  for j in 1 ..< k:
+    if s[i + j].uint8 notin 0x80'u8 .. 0xBF'u8: return 1
+  k
 
 proc setCell(x, y: int; cell: Cell) =
   if x < 0 or y < 0 or x >= cols or y >= rows: return
@@ -350,8 +377,14 @@ proc getFontMetrics*(f: Font): FontMetrics =
   FontMetrics(ascent: 1, descent: 0, lineHeight: 1)
 
 proc measureText*(f: Font; text: string): TextExtent =
-  ## One pixel per cell (cell==pixel), one row tall.
-  TextExtent(w: text.len, h: 1)
+  ## One column per codepoint (cell==pixel), one row tall. Bytes are not
+  ## columns: "ä" measures 1, not 2.
+  var w = 0
+  var i = 0
+  while i < text.len:
+    inc w
+    i += glyphLenAt(text, i)
+  TextExtent(w: w, h: 1)
 
 proc drawTextBody*(f: Font; x, y: int; text: string;
                    fg, bg: Color; known: TextExtent): TextExtent =
@@ -361,13 +394,15 @@ proc drawTextBody*(f: Font; x, y: int; text: string;
   let res = (if known.w > 0: known else: measureText(f, text))
   var cx = x
   ## `setCell` bounds- and clip-checks every cell itself, so the run stays
-  ## correct even when it starts at a negative x. (The old code precomputed
-  ## `inBounds`/`inClip` once, from the first character only: a label starting
-  ## at x < 0 was discarded whole, and characters past a boundary were still
-  ## tested against the first cell's position.)
-  for ch in text:
-    setCell(cx, y, makeCell(ch, fg, bg))
+  ## correct even when it starts at a negative x. Decode by codepoint, not by
+  ## byte: one cell receives the whole UTF-8 sequence of one character, so an
+  ## umlaut is one column and not two garbage cells.
+  var i = 0
+  while i < text.len:
+    let n = glyphLenAt(text, i)
+    setCell(cx, y, makeCellGlyph(text, i, n, fg, bg))
     inc cx
+    i += n
   res
 
 proc drawText*(f: Font; x, y: int; text: string; fg, bg: Color): TextExtent =
@@ -499,7 +534,8 @@ proc emitCell(sb: var string; x, y: int; cell: Cell;
   if not outValid or cell.bg != outBg:
     sb.add "\e[" & termColor(cell.bg, true) & "m"; outBg = cell.bg
   outValid = true
-  sb.add cell.ch
+  for k in 0 ..< int(cell.glyphLen):
+    sb.add cell.glyph[k]
 
 proc refresh*() =
   ## Copy this frame's changed cells to the surface (or, offscreen, to the
@@ -796,16 +832,16 @@ proc feedBytes*(bytes: openArray[uint8]) =
     for i, c in escAccum: work[i] = c.uint8
     for j, c in bytes: work[escAccum.len + j] = c
     escAccum.setLen 0
-  var d = newUtf8Decoder()
   var i = 0
   while i < work.len:
     let b = work[i]
-    if d.n == 0 and b == 0x1B'u8:
+    if utf8State.n == 0 and b == 0x1B'u8:
       let saveI = i
       emitEscape(work, i)
       if i == saveI: break    # held for more bytes; stop this chunk
       continue
-    let (res, val) = decodeByte(d, b)
+    let wasPartial = utf8State.n > 0
+    let (res, val) = decodeByte(utf8State, b)
     case res
     of drAscii:
       case b
@@ -826,18 +862,24 @@ proc feedBytes*(bytes: openArray[uint8]) =
         curMods = {CtrlPressed}
         eventQueue.add mkKey(k, curMods, true); eventQueue.add mkKey(k, curMods, false)
         curMods = {}
-        discard
+      inc i
     of drCodepoint:
       eventQueue.add newTextInput(val)
+      inc i
     of drPartial:
-      break   # stream ended mid-codepoint; the decoder already holds it
+      ## The decoder now holds the bytes so far and the rest of this codepoint
+      ## arrives in a later read; `utf8State` is module state, so the sequence
+      ## survives the call. (This used to `break`, which discarded every
+      ## multi-byte codepoint -- umlauts never reached the app at all.)
+      inc i
     of drError:
       eventQueue.add newTextInput(0xFFFD)
-      if d.n > 0:
-        discard     # bad continuation: reprocess b fresh, do not advance
+      if wasPartial:
+        ## A bad continuation: the decoder reset and did not consume `b`, so
+        ## reprocess it as a fresh byte -- it may be a valid lead.
+        discard
       else:
-        inc i       # invalid lead byte: consume it so we do not loop
-    inc i
+        inc i       # invalid lead byte: consume it
 
 proc drainInput(): bool =
   ## Read every pending byte, parse it into the event queue. Returns whether any
@@ -1019,6 +1061,8 @@ proc initTerminalDriver*() =
   eventQueue.setLen 0
   clipStack.setLen 0
   captured.setLen 0
+  escAccum.setLen 0
+  utf8State = newUtf8Decoder()
   gFirstFrame = true
 
   ## Populate the five global relays. Each field here points at a module-level

@@ -92,11 +92,30 @@ proc unescape(s: string): string =
       result.add s[i]
       inc i
 
+proc utf8LenAt(data: string; i: int): int =
+  ## Bytes of the UTF-8 codepoint at `data[i]`; 1 for ASCII or a malformed byte.
+  ## One codepoint occupies one terminal cell, so the screen model must advance
+  ## by this, not by a byte.
+  let b = data[i].uint8
+  var k = 0
+  if b < 0x80: k = 1
+  elif b >= 0xC2 and b <= 0xDF: k = 2
+  elif b >= 0xE0 and b <= 0xEF: k = 3
+  elif b >= 0xF0 and b <= 0xF4: k = 4
+  else: return 1
+  if i + k > data.len: return 1
+  for j in 1 ..< k:
+    if data[i + j].uint8 notin 0x80'u8 .. 0xBF'u8: return 1
+  k
+
 proc reconstruct(data: string; w, h: int): seq[string] =
   ## A tiny ANSI screen model: cursor positioning, erase-display, and literal
-  ## text. Colours and private modes are ignored -- enough to read the UI back.
-  result = newSeq[string](h)
-  for r in 0 ..< h: result[r] = repeat(' ', w)
+  ## text. Each cell holds one whole UTF-8 codepoint. Colours and private modes
+  ## are ignored -- enough to read the UI back.
+  var cells = newSeq[seq[string]](h)
+  for r in 0 ..< h:
+    cells[r] = newSeq[string](w)
+    for c in 0 ..< w: cells[r][c] = " "
   var cx, cy = 0
   var i = 0
   while i < data.len:
@@ -113,7 +132,8 @@ proc reconstruct(data: string; w, h: int): seq[string] =
           cy = (if p.len > 0 and p[0].len > 0: parseInt(p[0]) else: 1) - 1
           cx = (if p.len > 1 and p[1].len > 0: parseInt(p[1]) else: 1) - 1
         of 'J':
-          for r in 0 ..< h: result[r] = repeat(' ', w)
+          for r in 0 ..< h:
+            for cc in 0 ..< w: cells[r][cc] = " "
         else: discard
         i = j + 1
         continue
@@ -126,10 +146,16 @@ proc reconstruct(data: string; w, h: int): seq[string] =
         i += 2
         continue
     elif ord(c) >= 32:
+      let n = utf8LenAt(data, i)
       if cy >= 0 and cy < h and cx >= 0 and cx < w:
-        result[cy][cx] = c
+        cells[cy][cx] = data[i ..< i + n]
       inc cx
-    i += 1
+      i += n
+      continue
+    inc i
+  result = newSeq[string](h)
+  for r in 0 ..< h:
+    result[r] = cells[r].join("")
 
 proc toCStringArray(args: seq[string]): cstringArray =
   result = cast[cstringArray](alloc0((args.len + 1) * sizeof(cstring)))
