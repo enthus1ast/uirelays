@@ -616,18 +616,18 @@ proc emitCSI(seq: openArray[uint8]) =
     of 4, 8: eventQueue.add mkKey(KeyEnd, curMods, true); eventQueue.add mkKey(KeyEnd, curMods, false)
     of 5: eventQueue.add mkKey(KeyPageUp, curMods, true); eventQueue.add mkKey(KeyPageUp, curMods, false)
     of 6: eventQueue.add mkKey(KeyPageDown, curMods, true); eventQueue.add mkKey(KeyPageDown, curMods, false)
-    of 11, 15: eventQueue.add mkKey(KeyF1, curMods, true); eventQueue.add mkKey(KeyF1, curMods, false)
-    of 12, 16: eventQueue.add mkKey(KeyF2, curMods, true); eventQueue.add mkKey(KeyF2, curMods, false)
-    of 13, 17: eventQueue.add mkKey(KeyF3, curMods, true); eventQueue.add mkKey(KeyF3, curMods, false)
-    of 14, 18: eventQueue.add mkKey(KeyF4, curMods, true); eventQueue.add mkKey(KeyF4, curMods, false)
-    of 15, 19: eventQueue.add mkKey(KeyF5, curMods, true); eventQueue.add mkKey(KeyF5, curMods, false)
-    of 17, 21: eventQueue.add mkKey(KeyF6, curMods, true); eventQueue.add mkKey(KeyF6, curMods, false)
-    of 18, 22: eventQueue.add mkKey(KeyF7, curMods, true); eventQueue.add mkKey(KeyF7, curMods, false)
-    of 19, 23: eventQueue.add mkKey(KeyF8, curMods, true); eventQueue.add mkKey(KeyF8, curMods, false)
-    of 21, 25: eventQueue.add mkKey(KeyF9, curMods, true); eventQueue.add mkKey(KeyF9, curMods, false)
-    of 22, 26: eventQueue.add mkKey(KeyF10, curMods, true); eventQueue.add mkKey(KeyF10, curMods, false)
-    of 24, 28: eventQueue.add mkKey(KeyF11, curMods, true); eventQueue.add mkKey(KeyF11, curMods, false)
-    of 25, 29: eventQueue.add mkKey(KeyF12, curMods, true); eventQueue.add mkKey(KeyF12, curMods, false)
+    of 11: eventQueue.add mkKey(KeyF1, curMods, true); eventQueue.add mkKey(KeyF1, curMods, false)
+    of 12: eventQueue.add mkKey(KeyF2, curMods, true); eventQueue.add mkKey(KeyF2, curMods, false)
+    of 13: eventQueue.add mkKey(KeyF3, curMods, true); eventQueue.add mkKey(KeyF3, curMods, false)
+    of 14: eventQueue.add mkKey(KeyF4, curMods, true); eventQueue.add mkKey(KeyF4, curMods, false)
+    of 15: eventQueue.add mkKey(KeyF5, curMods, true); eventQueue.add mkKey(KeyF5, curMods, false)
+    of 16: eventQueue.add mkKey(KeyF6, curMods, true); eventQueue.add mkKey(KeyF6, curMods, false)
+    of 17: eventQueue.add mkKey(KeyF7, curMods, true); eventQueue.add mkKey(KeyF7, curMods, false)
+    of 18: eventQueue.add mkKey(KeyF8, curMods, true); eventQueue.add mkKey(KeyF8, curMods, false)
+    of 19: eventQueue.add mkKey(KeyF9, curMods, true); eventQueue.add mkKey(KeyF9, curMods, false)
+    of 20: eventQueue.add mkKey(KeyF10, curMods, true); eventQueue.add mkKey(KeyF10, curMods, false)
+    of 21: eventQueue.add mkKey(KeyF11, curMods, true); eventQueue.add mkKey(KeyF11, curMods, false)
+    of 22: eventQueue.add mkKey(KeyF12, curMods, true); eventQueue.add mkKey(KeyF12, curMods, false)
     else: discard
   of ord('m'), ord('d'), ord('S'), ord('T'):
     ## SGR attributes, cursor-position, page-scroll: nothing to report.
@@ -696,10 +696,10 @@ proc feedBytes*(bytes: openArray[uint8]) =
   ## an escape sequence (key or mouse); anything else is one UTF-8 codepoint,
   ## emitted as a single TextInputEvent. A partial sequence at the end is held
   ## for the next call, so a codepoint or escape split across reads stays whole.
-  var work = bytes
+  var work: seq[uint8] = @bytes
   if escAccum.len > 0:
     work = newSeq[uint8](escAccum.len + bytes.len)
-    for i, c in escAccum: work[i] = ord(c)
+    for i, c in escAccum: work[i] = c.uint8
     for j, c in bytes: work[escAccum.len + j] = c
     escAccum.setLen 0
   var d = newUtf8Decoder()
@@ -721,17 +721,17 @@ proc feedBytes*(bytes: openArray[uint8]) =
         eventQueue.add mkKey(KeyEnter, {}, true); eventQueue.add mkKey(KeyEnter, {}, false)
       of 8, 127:
         eventQueue.add mkKey(KeyBackspace, {}, true); eventQueue.add mkKey(KeyBackspace, {}, false)
-      of 1 .. 26:
-        let k = KeyCode(ord(KeyA) + (b.int - 1))
-        curMods = {CtrlPressed}
-        eventQueue.add mkKey(k, curMods, true); eventQueue.add mkKey(k, curMods, false)
-        curMods = {}
       of 32 .. 126:
         let k = asciiToKey(chr(b))
         if k != KeyNone:
           eventQueue.add mkKey(k, {}, true); eventQueue.add mkKey(k, {}, false)
         eventQueue.add newTextInput(b.uint32)
       else:
+        ## 1..26 minus the control keys above: Ctrl + <letter>.
+        let k = KeyCode(ord(KeyA) + (b.int - 1))
+        curMods = {CtrlPressed}
+        eventQueue.add mkKey(k, curMods, true); eventQueue.add mkKey(k, curMods, false)
+        curMods = {}
         discard
     of drCodepoint:
       eventQueue.add newTextInput(val)
