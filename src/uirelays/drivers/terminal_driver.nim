@@ -29,6 +29,17 @@ import std/times       # cpuTime
 import std/os          # getEnv
 import std/strutils    # contains
 
+## POSIX signal numbers and the "default handler" sentinel. `posix/posix` does
+## not reliably export them (only the generic ANSI-C ones, when at all), and the
+## platform signal we need (SIGWINCH) is nowhere in stdlib, so we declare what we
+## use directly. `signal()` takes the signum as a `cint`; `SIG_DFL` is just the
+## NULL handler, so a plain constant is a valid handler argument.
+const
+  SIGINT*   = cint(2)
+  SIGTERM*  = cint(15)
+  SIGWINCH* = cint(28)
+  SIG_DFL*  = cast[proc(a: cint) {.noconv.}](0)
+
 # ---------------------------------------------------------------------------
 # The cell, and the module-level state that one live surface keeps.
 # ---------------------------------------------------------------------------
@@ -89,7 +100,7 @@ outSink = emit
 proc zeroTimeval(): Timeval =
   ## A zero-valued `Timeval` (used as a non-blocking poll timeout). The C
   ## struct's fields are `distinct clong`, so a bare `0` will not bind.
-  Timeval(tv_sec: Time(0), tv_usec: Suseconds(0))
+  Timeval(tv_sec: posix.Time(0), tv_usec: posix.Suseconds(0))
 
 # ---------------------------------------------------------------------------
 # Colour (Step 1) -- ported verbatim from focim/src/focim/ansi.nim, which is
@@ -799,20 +810,20 @@ proc waitReady(timeoutMs: int): bool =
     if gShutdown:
       eventQueue.add Event(kind: QuitEvent)
       return true
-    var tv: Timeval
+    var tv = zeroTimeval()
     var tvptr: ptr Timeval = nil
     if timeoutMs >= 0:
       var rem = timeoutMs - (getTicks() - start)
       if rem <= 0: return false
-      tv.tv_sec = rem div 1000
-      tv.tv_usec = (rem mod 1000) * 1000
+      tv.tv_sec = posix.Time(rem div 1000)
+      tv.tv_usec = posix.Suseconds((rem mod 1000) * 1000)
       tvptr = tv.addr
     var fds: TFdSet
     FD_ZERO(fds)
     FD_SET(STDIN_FILENO, fds)
     let n = select(STDIN_FILENO + 1, fds.addr, nil, nil, tvptr)
     if n > 0:
-      drainInput()
+      discard drainInput()
     elif timeoutMs < 0 and n < 0:
       continue   # EINTR from a signal handler: block again
     else:
@@ -857,9 +868,9 @@ proc installSignals() =
   proc onWinch(sig: cint) {.noconv.} = discard gWinch
   proc onTerm(sig: cint) {.noconv.} = discard gShutdown
   proc onInt(sig: cint) {.noconv.} = discard gShutdown
-  discard signal(SIGWINCH, onWinch)
-  discard signal(SIGINT, onInt)
-  discard signal(SIGTERM, onTerm)
+  signal(SIGWINCH, onWinch)
+  signal(SIGINT, onInt)
+  signal(SIGTERM, onTerm)
 
 proc nonblock(enabled: bool) =
   var st: Termios
@@ -906,7 +917,7 @@ proc initTerminalDriver*() =
       e = eventQueue[0]
       eventQueue.delete(0)
       return true
-    drainInput()
+    discard drainInput()
     if eventQueue.len > 0:
       e = eventQueue[0]
       eventQueue.delete(0)
