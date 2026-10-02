@@ -16,7 +16,7 @@ import uirelays
 ## ambiguous with the `uirelays` wrappers.
 from uirelays/drivers/terminal_driver import
   captured, feedBytes, termColor, newUtf8Decoder, decodeByte, utf8Encode,
-  drAscii, drCodepoint, drPartial, drError
+  drAscii, drCodepoint, drPartial, drError, setTerminalCursor, tcSteadyUnderline
 
 ## Force offscreen mode and a fixed 16-colour palette so the assertions below
 ## are deterministic no matter where this is run (CI has no TTY; a developer's
@@ -495,13 +495,16 @@ proc relayTests =
   check("getClipboardText is empty (no read round trip)",
     getClipboardText() == "")
 
-  ## Cursor shape is DECSCUSR.
+  ## Cursor shapes are DECSCUSR; the portable kinds map onto the terminal's.
   captured.setLen 0
   setCursor(curIbeam)
   check("setCursor(curIbeam) emits a steady bar", captured.contains("\e[6 q"))
   captured.setLen 0
   setCursor(curDefault)
-  check("setCursor(curDefault) emits a steady block", captured.contains("\e[2 q"))
+  check("setCursor(curDefault) emits the default shape", captured.contains("\e[0 q"))
+  captured.setLen 0
+  setTerminalCursor(tcSteadyUnderline)
+  check("setTerminalCursor emits DECSCUSR 4", captured.contains("\e[4 q"))
 
   ## Focus in/out (mode 1004) turn into the focus events; repeats are
   ## deduplicated because terminals report the same transition more than once.

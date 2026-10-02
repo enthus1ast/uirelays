@@ -16,8 +16,8 @@ type
 proc main =
   initBackend()
 
-  # let layout = createWindow(800, 600)
-  let layout = createWindow(80, 30)
+  let layout = createWindow(800, 600)
+  # let layout = createWindow(80, 30)
   var width = layout.width
   var height = layout.height
   setWindowTitle("Paint - uirelays example")

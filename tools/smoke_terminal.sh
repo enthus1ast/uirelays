@@ -73,12 +73,17 @@ echo "smoke: terminal_demo keys"
   --send='400:\e[4~' \
   --send='500:\e[F' \
   --send='600:\e[1~' \
+  --send='700:\e[<35;37;3M' \
+  --send='750:\e[<0;37;3M' \
+  --send='790:\e[<0;37;3m' \
   --send='900:\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82' \
   --send='1400:\x03' \
   --expect='Key Insert' \
   --expect='Key Delete' \
   --expect='Key End' \
   --expect='Key Home' \
+  --expect='Cursor -> blinking block' \
+  --expect-raw='\e[1 q' \
   --expect='typed: Привет' \
   --expect-exit
 

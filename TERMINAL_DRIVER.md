@@ -46,8 +46,9 @@ holds one whole UTF-8 glyph (1–4 bytes), `fg`/`bg` RGB and a bold bit.
 Raw mode (`ICANON`/`ECHO` off), alternate screen `1049`, mouse `1003`+`1006`,
 focus `1004`. `SIGWINCH`/`SIGINT`/`SIGTERM` set flags and write to a **self-pipe**
 so a blocking `select` wakes despite `SA_RESTART`; `SIGWINCH` re-queries the
-size and emits a `WindowMetricsEvent`. Title OSC 0, cursor shape DECSCUSR,
-clipboard write OSC 52.
+size and emits a `WindowMetricsEvent`. Title OSC 0, cursor shape DECSCUSR
+(`setCursor` maps `CursorKind`; `setTerminalCursor`/`TerminalCursor` expose all
+seven shapes), clipboard write OSC 52.
 
 ## Relays
 

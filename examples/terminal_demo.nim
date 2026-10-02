@@ -18,16 +18,22 @@
 ##              drop a point; consecutive points are joined with `drawLine`,
 ##              each segment a different colour (row 1 is a hue spectrum, row 5
 ##              a black-to-white ramp -- both show how deep the terminal is)
-##   1-4        activate the matching button from the keyboard
+##   1-5        activate the matching button from the keyboard
+##   Cursor     cycle through every cursor shape this terminal can show
 ##   c          clear the event log and the drawn line
 ##   Esc/Ctrl+Q quit
 
 import std/strutils
 import uirelays
+from uirelays/drivers/terminal_driver import TerminalCursor, setTerminalCursor
 
 const
-  ButtonCount = 4
+  ButtonCount = 5
   MaxLog = 200
+  CursorShapes = [
+    tcDefault, tcBlinkBlock, tcSteadyBlock,
+    tcBlinkUnderline, tcSteadyUnderline, tcBlinkBar, tcSteadyBar,
+  ]
 
 type
   Button = object
@@ -37,6 +43,17 @@ type
 proc centered(r: Rect; label: string): tuple[x, y: int] =
   ## Where a one-row label sits so it looks centred in the rectangle.
   (r.x + max(0, (r.w - label.len) div 2), r.y + r.h div 2)
+
+proc cursorName(c: TerminalCursor): string =
+  ## A readable name for the status line.
+  case c
+  of tcDefault: "default"
+  of tcBlinkBlock: "blinking block"
+  of tcSteadyBlock: "steady block"
+  of tcBlinkUnderline: "blinking underline"
+  of tcSteadyUnderline: "steady underline"
+  of tcBlinkBar: "blinking bar"
+  of tcSteadyBar: "steady bar"
 
 proc hueColor(h: float; s = 1.0; v = 1.0): Color =
   ## HSV -> RGB, `h` in [0, 1). Small and dependency-free, used for the spectrum
@@ -120,6 +137,8 @@ proc main =
   var pressed = -1
   var log: seq[string] = @[]
   var typed: seq[string] = @[]   ## typed codepoints (each event is one)
+  var cursorIdx = 0              ## index into CursorShapes
+  var lastCursorIdx = -1         ## last shape pushed to the terminal
   var polyline: seq[Point] = @[] ## left clicks on empty space, joined by lines
   var buttons: array[ButtonCount, Button]
 
@@ -140,10 +159,13 @@ proc main =
       theme = (theme + 1) mod palette.len
       addLog(log, "Theme -> " & $theme)
     of 2:
+      cursorIdx = (cursorIdx + 1) mod CursorShapes.len
+      addLog(log, "Cursor -> " & cursorName(CursorShapes[cursorIdx]))
+    of 3:
       log.setLen 0
       polyline.setLen 0
       addLog(log, "Log and line cleared")
-    of 3:
+    of 4:
       running = false
     else: discard
 
@@ -158,8 +180,9 @@ proc main =
       buttons[i].r = rect(margin + i * (btnW + gap), btnY, btnW, btnH)
     buttons[0].label = "Count"
     buttons[1].label = "Theme"
-    buttons[2].label = "Clear"
-    buttons[3].label = "Quit"
+    buttons[2].label = "Cursor"
+    buttons[3].label = "Clear"
+    buttons[4].label = "Quit"
 
     # --- events ------------------------------------------------------------
     var e = Event()
@@ -212,7 +235,7 @@ proc main =
         of KeyQ:
           if CtrlPressed in e.mods: running = false
           else: addLog(log, "Key " & keyLabel(e))
-        of Key1 .. Key4:
+        of Key1 .. Key5:
           activate(ord(e.key) - ord(Key1))
         of KeyC:
           log.setLen 0
@@ -281,7 +304,9 @@ proc main =
     # live status
     discard drawText(font, margin, btnY + btnH + 1,
                      "Clicks: " & $counter, fg, bg)
-    var status = $width & "x" & $height & "  mouse x=" & $mouseX & " y=" & $mouseY
+    var status = $width & "x" & $height &
+                 "  cursor: " & cursorName(CursorShapes[cursorIdx]) &
+                 "  mouse x=" & $mouseX & " y=" & $mouseY
     if hovered >= 0:
       status &= "  over: " & buttons[hovered].label
     elif not mouseSeen:
@@ -317,7 +342,7 @@ proc main =
 
     # help line
     discard drawText(font, margin, helpY,
-                     "1-4 buttons  c clear  click empty: draw  Ctrl+Q quit",
+                     "1-5 buttons  c clear  click empty: draw  Ctrl+Q quit",
                      muted, bg)
 
     # The `drawLine` polyline: segments between the dropped points, a marker at
@@ -335,6 +360,12 @@ proc main =
       if mouseSeen:
         let last = polyline[^1]
         drawLine(last.x, last.y, mouseX, mouseY, border)
+
+    ## Push the cursor shape when it changes (DECSCUSR). The frame shows the
+    ## cursor again after each refresh, so this is what stays visible.
+    if cursorIdx != lastCursorIdx:
+      setTerminalCursor(CursorShapes[cursorIdx])
+      lastCursorIdx = cursorIdx
 
     # the virtual pointer, last so it is always on top
     if mouseSeen:

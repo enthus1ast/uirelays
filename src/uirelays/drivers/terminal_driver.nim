@@ -584,21 +584,38 @@ proc saveState*() =
 proc restoreState*() =
   if clipStack.len > 0:
     clip = clipStack.pop
+
+type
+  TerminalCursor* = enum
+    ## The cursor shapes DECSCUSR offers -- every cursor a terminal can show.
+    ## `setCursor` maps the generic `CursorKind` onto these.
+    tcDefault = 0         ## the terminal's configured default
+    tcBlinkBlock = 1
+    tcSteadyBlock = 2
+    tcBlinkUnderline = 3
+    tcSteadyUnderline = 4
+    tcBlinkBar = 5
+    tcSteadyBar = 6
+
+proc setTerminalCursor*(c: TerminalCursor) =
+  ## Set the terminal cursor shape directly (DECSCUSR). `setCursor` is the
+  ## portable path; this exposes the shapes the terminal actually has.
+  outSink("\e[" & $c.ord & " q")
+
 proc setCursor*(c: CursorKind) =
-  ## A terminal has no shaped cursor to hand out, but DECSCUSR can choose
-  ## between a block, a bar and an underline. Visibility is the frame's job: it
-  ## hides the cursor while drawing and shows it again in `refresh`.
-  let ps =
+  ## The terminal only has block, underline and bar shapes, so each portable
+  ## cursor kind is mapped to the closest one. Visibility is the frame's job
+  ## (it hides the cursor while drawing and shows it in `refresh`).
+  setTerminalCursor(
     case c
-    of curIbeam: 6              # steady bar
-    of curDefault, curArrow: 2  # steady block
-    else: 1                     # blinking block
-  outSink("\e[" & $ps & " q")
-  if tty:
-    if c == curDefault or c == curIbeam:
-      showCursor()
-    else:
-      hideCursor()
+    of curDefault: tcDefault
+    of curArrow: tcSteadyBlock
+    of curIbeam: tcSteadyBar
+    of curWait: tcBlinkBlock
+    of curCrosshair: tcBlinkBar
+    of curHand: tcBlinkUnderline
+    of curSizeNS: tcSteadyUnderline
+    of curSizeWE: tcBlinkBlock)
 
 proc clipboardWrite(text: string) =
   ## OSC 52: ask the terminal to put `text` on the system clipboard. Best
