@@ -111,6 +111,7 @@ var
   sigFd: array[0 .. 1, cint] = [-1.cint, -1.cint]  ## self-pipe for wakeups
   sigByte: uint8 = 0            ## the byte the signal handlers write
   escAccum: string              ## an escape sequence cut off mid-way, held
+  escTick = 0                   ## ms a lone ESC has been held (0 = none)
   utf8State: Utf8Decoder        ## a UTF-8 codepoint cut off mid-way, held
   eventQueue: seq[Event]
   lastClickTick = 0             ## ms of the previous press, for click runs
@@ -919,15 +920,15 @@ proc emitSGRMouse(seq: openArray[uint8]) =
                          clicks: nextClickCount(mx, my, btn))
 
 proc modsFromParam(p: int): set[Modifier] =
-  ## xterm's modifier parameter in a CSI sequence: 1 plus a bitmask, 1=Shift,
-  ## 2=Alt, 4=Ctrl, 8=Meta. So `ESC[1;5A` is Ctrl+Up and `ESC[3;2~` is
-  ## Shift+Delete.
+  ## xterm's modifier parameter: 1 plus a bitmask, 1=Shift, 2=Alt, 4=Ctrl,
+  ## 8=Meta. The kitty protocol adds 16=Hyper and 32=Meta in the same field;
+  ## the framework has one `Gui` modifier for all of those.
   if p <= 1: return {}
   let m = p - 1
   if (m and 1) != 0: result.incl ShiftPressed
   if (m and 2) != 0: result.incl AltPressed
   if (m and 4) != 0: result.incl CtrlPressed
-  if (m and 8) != 0: result.incl GuiPressed
+  if (m and 0b111000) != 0: result.incl GuiPressed
 
 proc emitKeyPair(code: KeyCode; mods: set[Modifier]) =
   ## A key press is reported as a down/up pair, so an app that watches only
@@ -951,6 +952,67 @@ proc emitSS3(fn: uint8) =
   of ord('S'): emitKeyPair(KeyF4, {})
   else: discard
 
+## How long a lone ESC waits for a follow-up byte before it is taken to be the
+## Escape key. Terminals that support modifyOtherKeys/kitty disambiguate it for
+## us; one that supports neither sends a bare ESC for both Escape and the start
+## of an Alt/meta sequence, and a short pause is the only way to tell them apart.
+const EscTimeoutMs = 60
+
+proc checkEscTimeout() =
+  if escAccum.len == 1 and escAccum[0] == '\e':
+    let now = int(getMonoTime().ticks div 1_000_000)
+    if escTick == 0:
+      escTick = now
+    elif now - escTick >= EscTimeoutMs:
+      escAccum.setLen 0
+      escTick = 0
+      eventQueue.add mkKey(KeyEsc, {}, true)
+  else:
+    escTick = 0
+
+proc newTextInput(cp: uint32): Event   ## forward decl: defined below
+
+proc emitCharKey(code: int; mods: set[Modifier]) =
+  ## A character key from a modifier-carrying protocol: the terminal reports the
+  ## Unicode codepoint and the modifiers a plain byte would have lost. The C0
+  ## codepoints a modifier protocol uses for the named keys go back to their
+  ## KeyCode; the rest is text.
+  if code <= 0 or code > 0x10FFFF: return
+  case code
+  of 8, 127: emitKeyPair(KeyBackspace, mods); return
+  of 9: emitKeyPair(KeyTab, mods); return
+  of 10, 13: emitKeyPair(KeyEnter, mods); return
+  of 27: emitKeyPair(KeyEsc, mods); return
+  else: discard
+  if code < 0x80:
+    let k = asciiToKey(chr(code))
+    if k != KeyNone: emitKeyPair(k, mods)
+  if CtrlPressed notin mods:
+    eventQueue.add newTextInput(uint32(code))
+
+proc emitCsiU(params: seq[int]) =
+  ## kitty keyboard protocol (`CSI > 1 u`): `CSI code ; modifiers u`.
+  ## Functional keys use codepoints from 57344 up; the rest are characters.
+  let code = params[0]
+  let mods = (if params.len > 1: modsFromParam(params[1] and 0xFF) else: {})
+  case code
+  of 57344: emitKeyPair(KeyEsc, mods)
+  of 57345: emitKeyPair(KeyEnter, mods)
+  of 57346: emitKeyPair(KeyTab, mods)
+  of 57347: emitKeyPair(KeyBackspace, mods)
+  of 57348: emitKeyPair(KeyInsert, mods)
+  of 57349: emitKeyPair(KeyDelete, mods)
+  of 57350: emitKeyPair(KeyLeft, mods)
+  of 57351: emitKeyPair(KeyRight, mods)
+  of 57352: emitKeyPair(KeyUp, mods)
+  of 57353: emitKeyPair(KeyDown, mods)
+  of 57354: emitKeyPair(KeyPageUp, mods)
+  of 57355: emitKeyPair(KeyPageDown, mods)
+  of 57356: emitKeyPair(KeyHome, mods)
+  of 57357: emitKeyPair(KeyEnd, mods)
+  of 57364 .. 57375: emitKeyPair(KeyCode(ord(KeyF1) + (code - 57364)), mods)
+  else: emitCharKey(code, mods)
+
 proc emitCSI(seq: openArray[uint8]) =
   ## `seq` is a complete CSI: ESC, '[', params, final byte.
   if seq.len >= 3 and seq[2] == ord('<'):
@@ -969,6 +1031,8 @@ proc emitCSI(seq: openArray[uint8]) =
     elif c.chr == ';':
       params.add (if n < 0: 0 else: n)
       n = -1
+    elif c.chr == ':':
+      break   # kitty's `mod:event` shorthand: keep the modifiers, drop the rest
   if n >= 0: params.add n
   let p0 = if params.len > 0: params[0] else: 0
   ## The second parameter, when present, is the modifier (modsFromParam); it
@@ -998,30 +1062,38 @@ proc emitCSI(seq: openArray[uint8]) =
       of ord('Q'): emitKeyPair(KeyF2, mods)
       of ord('R'): emitKeyPair(KeyF3, mods)
       else: emitKeyPair(KeyF4, mods)
+  of ord('u'):
+    ## kitty keyboard protocol: `CSI code ; modifiers u`.
+    if params.len > 0: emitCsiU(params)
   of ord('~'):
-    ## ctlseqs.ms, "PC-Style Function Keys": F5=15~, then 17~..21~ for
-    ## F6..F10 and 23~, 24~ for F11, F12. 16 and 22 are unassigned, so the old
-    ## 16..22 run shifted every key from F6 on by one.
-    case p0
-    of 1, 7: emitKeyPair(KeyHome, mods)
-    of 2: emitKeyPair(KeyInsert, mods)
-    of 3: emitKeyPair(KeyDelete, mods)
-    of 4, 8: emitKeyPair(KeyEnd, mods)
-    of 5: emitKeyPair(KeyPageUp, mods)
-    of 6: emitKeyPair(KeyPageDown, mods)
-    of 11: emitKeyPair(KeyF1, mods)
-    of 12: emitKeyPair(KeyF2, mods)
-    of 13: emitKeyPair(KeyF3, mods)
-    of 14: emitKeyPair(KeyF4, mods)
-    of 15: emitKeyPair(KeyF5, mods)
-    of 17: emitKeyPair(KeyF6, mods)
-    of 18: emitKeyPair(KeyF7, mods)
-    of 19: emitKeyPair(KeyF8, mods)
-    of 20: emitKeyPair(KeyF9, mods)
-    of 21: emitKeyPair(KeyF10, mods)
-    of 23: emitKeyPair(KeyF11, mods)
-    of 24: emitKeyPair(KeyF12, mods)
-    else: discard
+    if params.len == 3 and params[0] == 27:
+      ## xterm modifyOtherKeys: `CSI 27 ; modifiers ; code ~` -- the modifiers
+      ## a plain byte would have lost (Alt+<key>, Ctrl+<punctuation>, ...).
+      emitCharKey(params[2], modsFromParam(params[1]))
+    else:
+      ## ctlseqs.ms, "PC-Style Function Keys": F5=15~, then 17~..21~ for
+      ## F6..F10 and 23~, 24~ for F11, F12. 16 and 22 are unassigned, so the
+      ## old 16..22 run shifted every key from F6 on by one.
+      case p0
+      of 1, 7: emitKeyPair(KeyHome, mods)
+      of 2: emitKeyPair(KeyInsert, mods)
+      of 3: emitKeyPair(KeyDelete, mods)
+      of 4, 8: emitKeyPair(KeyEnd, mods)
+      of 5: emitKeyPair(KeyPageUp, mods)
+      of 6: emitKeyPair(KeyPageDown, mods)
+      of 11: emitKeyPair(KeyF1, mods)
+      of 12: emitKeyPair(KeyF2, mods)
+      of 13: emitKeyPair(KeyF3, mods)
+      of 14: emitKeyPair(KeyF4, mods)
+      of 15: emitKeyPair(KeyF5, mods)
+      of 17: emitKeyPair(KeyF6, mods)
+      of 18: emitKeyPair(KeyF7, mods)
+      of 19: emitKeyPair(KeyF8, mods)
+      of 20: emitKeyPair(KeyF9, mods)
+      of 21: emitKeyPair(KeyF10, mods)
+      of 23: emitKeyPair(KeyF11, mods)
+      of 24: emitKeyPair(KeyF12, mods)
+      else: discard
   of ord('I'):
     ## Focus in/out, when mode 1004 is enabled. They carry no payload. A
     ## terminal may report the same transition more than once (blur *and*
@@ -1164,6 +1236,7 @@ proc drainInput(): bool =
   FD_ZERO(fds)
   FD_SET(STDIN_FILENO, fds)
   if select(STDIN_FILENO + 1, fds.addr, nil, nil, tv.addr) <= 0:
+    checkEscTimeout()
     return false
   var data = newSeq[uint8](DrainMax)
   var n = 0
@@ -1178,7 +1251,9 @@ proc drainInput(): bool =
     else: break
   if n > 0:
     feedBytes(data[0 ..< n])
+    checkEscTimeout()
     return true
+  checkEscTimeout()
   return false
 
 proc handleResizeEvent() =
@@ -1212,6 +1287,8 @@ proc waitReady(timeoutMs: int): bool =
     if gShutdown:
       eventQueue.add Event(kind: QuitEvent)
       return true
+    checkEscTimeout()
+    if eventQueue.len > 0: return true
     var tv = zeroTimeval()
     var tvptr: ptr Timeval = nil
     if timeoutMs >= 0:
@@ -1219,6 +1296,12 @@ proc waitReady(timeoutMs: int): bool =
       if rem <= 0: return false
       tv.tv_sec = posix.Time(rem div 1000)
       tv.tv_usec = posix.Suseconds((rem mod 1000) * 1000)
+      tvptr = tv.addr
+    elif escAccum.len == 1 and escAccum[0] == '\e':
+      ## A lone ESC is pending: wake soon to either time it out as the Escape
+      ## key or see the byte that turns it into an Alt/meta sequence.
+      tv.tv_sec = posix.Time(0)
+      tv.tv_usec = posix.Suseconds(EscTimeoutMs * 1000)
       tvptr = tv.addr
     var fds: TFdSet
     FD_ZERO(fds)
@@ -1231,14 +1314,13 @@ proc waitReady(timeoutMs: int): bool =
     if n > 0:
       drainSignalPipe()
       discard drainInput()
-    elif timeoutMs < 0 and n < 0:
+      continue
+    if n < 0 and timeoutMs < 0:
       continue   # EINTR from a signal handler: block again
-    else:
-      if timeoutMs < 0:
-        if n > 0 or eventQueue.len > 0: continue
-        return false   # truly blocked and nothing came
-      var rem = timeoutMs - (getTicks() - start)
-      if rem <= 0: return false
+    if timeoutMs < 0:
+      continue   # the ESC timeout elapsed; the loop checks it
+    var rem = timeoutMs - (getTicks() - start)
+    if rem <= 0: return false
 
 # ---------------------------------------------------------------------------
 # The input relays, installed from initTerminalDriver (so the proc bodies can
@@ -1316,10 +1398,12 @@ proc enterTerminal() =
   stdout.write "\e[?1003h"   # mouse: clicks and all motion
   stdout.write "\e[?1006h"   # mouse: SGR encoding
   stdout.write "\e[?1004h"   # focus in/out reports (CSI I / CSI O)
+  stdout.write "\e[>4;1m"    # xterm modifyOtherKeys: report lost modifiers
+  stdout.write "\e[>1u"      # kitty keyboard: disambiguate escape codes
   stdout.flushFile()
   hideCursor()
 proc leaveTerminal() =
-  stdout.write "\e[?1004l\e[?1003l\e[?1006l\e[?1049l\e[0m"
+  stdout.write "\e[>4;0m\e[<u\e[?1004l\e[?1003l\e[?1006l\e[?1049l\e[0m"
   stdout.flushFile()
   showCursor()
   nonblock(false)

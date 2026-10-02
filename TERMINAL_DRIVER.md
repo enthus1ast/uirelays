@@ -36,6 +36,11 @@ holds one whole UTF-8 glyph (1–4 bytes), `fg`/`bg` RGB and a bold bit.
 - keys: UTF-8 text, Ctrl+A–Z/`\`/`]`/…, Ctrl+Space, Tab/Shift+Tab, Enter,
   Backspace, arrows, Home/End, Insert/Delete, PageUp/Down, F1–F12 — with
   Shift/Ctrl/Alt/Meta modifiers.
+- `modifyOtherKeys` (xterm, level 1) and the kitty keyboard protocol are
+  enabled, so Alt+key, Ctrl+punctuation and Shift+letter arrive with the
+  modifiers a plain byte would have lost; both encodings are parsed.
+- Escape comes from `CSI 27 u` (kitty) or, when the terminal sends a bare
+  `ESC`, after a 60 ms pause with no follow-up byte.
 - SGR mouse (1003 + 1006): motion, down/up, wheel + horizontal tilt,
   double/triple click (500 ms, 4 cells, same button).
 - focus in/out (1004), deduplicated.
@@ -78,5 +83,6 @@ to the `captured` string instead of a terminal. All unit tests run this way.
 - no image *decoder* (`loadImage`/`drawImage`); apps hand over finished pixels
   with `blitRGBA` instead;
 - double-width glyphs (CJK, emoji) count as one cell (no `wcwidth`);
-- `Alt+<key>` is reported as `Esc` + text;
-- bracketed paste / modifyOtherKeys / Kitty keyboard not enabled.
+- `Alt+<key>` is reported as `Esc` + text *only* on a terminal that supports
+  neither modifyOtherKeys nor the kitty protocol;
+- bracketed paste (2004) is not enabled.

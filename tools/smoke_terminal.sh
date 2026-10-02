@@ -70,6 +70,16 @@ COLORTERM=truecolor .build/pty_smoke .build/terminal_demo --wait=1.0 --send='800
   --expect-raw='\e[38;2;' --expect-raw='\e[48;2;' \
   --expect-exit
 
+echo "smoke: terminal_demo modifiers"
+.build/pty_smoke .build/terminal_demo --wait=1.2 \
+  --send='300:\e[27;5;61~' \
+  --send='500:\e[61;5u' \
+  --send='800:\x03' \
+  --expect='Zoom 1x1' \
+  --expect-raw='\e[>4;1m' \
+  --expect-raw='\e[>1u' \
+  --expect-exit
+
 echo "smoke: terminal_demo keys"
 .build/pty_smoke .build/terminal_demo --wait=1.8 \
   --send='200:\e[2~' \
@@ -137,8 +147,8 @@ echo "smoke: terminal_demo clicks"
   --expect-exit
 
 echo "smoke: terminal_first"
-.build/pty_smoke .build/terminal_first --wait=1.0 \
-  --send='600:\x1bq' \
+.build/pty_smoke .build/terminal_first --wait=1.2 \
+  --send='600:\x1b' \
   --expect='terminal-first demo' \
   --expect='one layout, 1x1 per cell' \
   --expect='Esc or Ctrl+Q quit' \

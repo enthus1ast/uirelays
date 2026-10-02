@@ -294,6 +294,24 @@ proc unitSizeTests =
   check("drawText at app (1,1) lands at driver (2,3)",
     captured.contains("\e[4;3H"))
 
+  ## A point fills a whole unit (2x3 cells); a line is a run of those.
+  captured.setLen 0
+  fillRect(rect(0, 0, 10, 4), color(0, 0, 0))
+  refresh()
+  captured.setLen 0
+  drawPoint(1, 1, color(205, 0, 0))
+  refresh()
+  check("drawPoint fills a unit (2x3 cells)", captured.count("H") == 6)
+
+  captured.setLen 0
+  fillRect(rect(0, 0, 10, 4), color(0, 0, 0))
+  refresh()
+  captured.setLen 0
+  drawLine(0, 0, 2, 0, color(205, 0, 0))
+  refresh()
+  check("drawLine is one unit thick (3 blocks of 2x3)",
+    captured.count("H") == 18)
+
   ## Mouse coordinates come back in application units.
   feedBytes(@[0x1B'u8, ord('[').uint8, ord('<').uint8, ord('0').uint8,
               ord(';').uint8, ord('5').uint8, ord(';').uint8, ord('7').uint8,
@@ -442,6 +460,45 @@ proc editKeyTests =
     if e.kind == KeyDownEvent: got.add e.key
   check("back-to-back editing keys keep their order",
     got == @[KeyInsert, KeyDelete, KeyEnd, KeyEnd])
+
+# ---------------------------------------------------------------------------
+# Modifier-carrying protocols: xterm modifyOtherKeys and the kitty protocol.
+# ---------------------------------------------------------------------------
+proc modifierTests =
+  echo "modifiers:"
+  proc mkey(seq: string; want: KeyCode; wantMods: set[Modifier]) =
+    let e = firstEvent(seq)
+    check(seq & " -> " & $want & " " & $wantMods,
+      e.kind == KeyDownEvent and e.key == want and e.mods == wantMods)
+    var tmp: Event
+    while pollEvent(tmp): discard          # drain the pair / text
+
+  ## xterm modifyOtherKeys: CSI 27 ; mod ; code ~
+  mkey("\e[27;3;120~", KeyX, {AltPressed})       # Alt+x
+  mkey("\e[27;5;61~", KeyEqual, {CtrlPressed})   # Ctrl+=
+  mkey("\e[27;5;45~", KeyMinus, {CtrlPressed})   # Ctrl+-
+  mkey("\e[27;2;97~", KeyA, {ShiftPressed})      # Shift+a
+  mkey("\e[27;9;120~", KeyX, {GuiPressed})       # Meta+x
+
+  ## kitty: CSI code ; mod u
+  mkey("\e[120;3u", KeyX, {AltPressed})
+  mkey("\e[61;5u", KeyEqual, {CtrlPressed})
+  mkey("\e[57352;2u", KeyUp, {ShiftPressed})     # functional Shift+Up
+  mkey("\e[57364;5u", KeyF1, {CtrlPressed})      # Ctrl+F1
+  mkey("\e[97;17u", KeyA, {GuiPressed})          # Hyper+a -> Gui
+  mkey("\e[97;5:2u", KeyA, {CtrlPressed})        # `mod:event` drops the event
+
+  ## kitty represents the Escape key as `CSI 27 u`.
+  mkey("\e[27u", KeyEsc, {})
+
+  ## A bare ESC with nothing after it is the Escape key after a short pause
+  ## (a terminal that supports neither protocol sends just `ESC`).
+  var e2: Event
+  feedBytes(@[0x1B'u8])
+  check("a lone ESC queues nothing at first", not pollEvent(e2))
+  os.sleep(100)
+  check("a lone ESC times out to KeyEsc",
+    pollEvent(e2) and e2.kind == KeyDownEvent and e2.key == KeyEsc)
 
 proc clickTests =
   echo "click counts:"
@@ -679,6 +736,7 @@ proc main() =
   keyModTests()
   functionKeyTests()
   editKeyTests()
+  modifierTests()
   relayTests()
   clickTests()
   mouseTests()

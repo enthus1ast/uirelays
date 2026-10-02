@@ -10,6 +10,9 @@
 ##   nim c -d:terminal examples/terminal_first.nim
 ## Compile as a GUI (whichever backend the platform picks):
 ##   nim c examples/terminal_first.nim
+##
+## Ctrl+plus / Ctrl+minus change the cell size (GUI only; a terminal cell is
+## fixed).
 
 import uirelays
 
@@ -28,14 +31,31 @@ proc centered(font: Font; r: Rect; s: string): tuple[x, y: int] =
    r.y + max(0, (r.h - 1) div 2))
 
 proc main =
-  setUnitSize(CellW, CellH)
+  var cellW = CellW
+  var cellH = CellH
+  setUnitSize(cellW, cellH)
   let layout = createWindow(80, 24)
   var width = layout.width
   var height = layout.height
 
   var fm = FontMetrics()
-  let font = openFont("", 1, fm)
+  var font = openFont("", 1, fm)
   setWindowTitle("terminal-first demo")
+
+  proc zoom(delta: int) =
+    ## Ctrl+plus / Ctrl+minus change the cell size. On a terminal a cell is
+    ## fixed, so it only does something on a GUI.
+    when not defined(terminal):
+      cellW = max(4, min(28, cellW + delta))
+      cellH = max(8, min(56, cellH + 2 * delta))
+      setUnitSize(cellW, cellH)
+      closeFont(font)
+      font = openFont("", 1, fm)
+      let l = getWindowLayout()
+      width = l.width
+      height = l.height
+    else:
+      discard delta
 
   let bg = color(24, 24, 32)
   let panel = color(40, 42, 54)
@@ -56,6 +76,10 @@ proc main =
       of KeyDownEvent:
         if e.key == KeyEsc or (e.key == KeyQ and CtrlPressed in e.mods):
           running = false
+        elif CtrlPressed in e.mods and e.key in {KeyPlus, KeyEqual}:
+          zoom(1)
+        elif CtrlPressed in e.mods and e.key == KeyMinus:
+          zoom(-1)
       else: discard
 
     fillRect(rect(0, 0, width, height), bg)
@@ -79,7 +103,7 @@ proc main =
     if main.w > 2 and main.h > 2:
       fillRect(main, panel)
       drawFrame(main, accent, 1)
-      let title = "one layout, " & $CellW & "x" & $CellH & " per cell"
+      let title = "one layout, " & $cellW & "x" & $cellH & " per cell"
       let p = centered(font, main, title)
       discard drawText(font, p.x, p.y, title, fg, panel)
 

@@ -327,10 +327,39 @@ proc drawFrame*(r: Rect; color: Color; width = 1) =
   fillRect(rect(r.x, r.y + r.h - w, r.w, w), color)
   fillRect(rect(r.x, r.y, w, r.h), color)
   fillRect(rect(r.x + r.w - w, r.y, w, r.h), color)
-proc drawLine*(x1, y1, x2, y2: int; color: Color) =
-  drawRelays.drawLine(x1 * unitW, y1 * unitH, x2 * unitW, y2 * unitH, color)
 proc drawPoint*(x, y: int; color: Color) =
-  drawRelays.drawPoint(x * unitW, y * unitH, color)
+  ## One application unit. With a unit of one pixel this is the driver's own
+  ## point; otherwise it fills a whole unit, which is what a terminal cell is --
+  ## a driver point is a single pixel and would come out hairline-thin.
+  if unitW == 1 and unitH == 1:
+    drawRelays.drawPoint(x, y, color)
+  else:
+    drawRelays.fillRect(rect(x * unitW, y * unitH, unitW, unitH), color)
+proc drawLine*(x1, y1, x2, y2: int; color: Color) =
+  ## One unit thick. With a unit of one pixel this is the driver's own line;
+  ## otherwise it steps cell by cell -- the way the terminal's line does -- so
+  ## a diagonal is a run of unit blocks and not a one-pixel thread.
+  if unitW == 1 and unitH == 1:
+    drawRelays.drawLine(x1, y1, x2, y2, color)
+    return
+  ## Bresenham in application units.
+  let dx = abs(x2 - x1)
+  let dy = -abs(y2 - y1)
+  var sx = (if x1 < x2: 1 else: -1)
+  var sy = (if y1 < y2: 1 else: -1)
+  var err = dx + dy
+  var cx = x1
+  var cy = y1
+  while true:
+    drawPoint(cx, cy, color)
+    if cx == x2 and cy == y2: break
+    let e2 = err * 2
+    if e2 >= dy:
+      err += dy
+      cx += sx
+    if e2 <= dx:
+      err += dx
+      cy += sy
 proc loadImage*(path: string): Image =
   ## `Image(0)` from a driver that does not offer images, the same handle it
   ## gives for a file it could not open.

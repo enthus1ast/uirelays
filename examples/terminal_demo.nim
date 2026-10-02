@@ -22,6 +22,9 @@
 ##   Frame      switch between a solid colour frame and character frames
 ##   Cursor     cycle through every cursor shape this terminal can show
 ##   i          toggle the `blitRGBA` image view (half blocks vs 1x1 cells)
+##   Ctrl+plus / Ctrl+minus
+##              change the cell size (`setUnitSize`) -- GUI only, a terminal
+##              cell is fixed
 ##   c          clear the event log and the drawn line
 ##   Esc/Ctrl+Q quit
 
@@ -37,6 +40,17 @@ const
     tcDefault, tcBlinkBlock, tcSteadyBlock,
     tcBlinkUnderline, tcSteadyUnderline, tcBlinkBar, tcSteadyBar,
   ]
+
+when defined(terminal):
+  const
+    CellW = 1
+    CellH = 1
+else:
+  ## A terminal-first app on a GUI: one cell is 9x18 device pixels. Zoom
+  ## (Ctrl+plus / Ctrl+minus) changes this at run time.
+  const
+    CellW = 9
+    CellH = 18
 
 type
   Button = object
@@ -171,18 +185,45 @@ proc addLog(log: var seq[string]; line: string) =
     log.setLen(MaxLog)
 
 proc main =
+  var cellW = CellW
+  var cellH = CellH
+  setUnitSize(cellW, cellH)
   let layout = createWindow(80, 24)
   var width = layout.width
   var height = layout.height
   var fm = FontMetrics()
-  let font = openFont("", layout.scaled(1), fm)
+  var font = openFont("", 1, fm)
   ## The terminal carries the style on the font handle: one variant per style,
   ## `drawText` turns it into cell attributes.
-  let fontBold = styledFont(font, {FontStyle.bold})
-  let fontItalic = styledFont(font, {FontStyle.italics})
-  let fontUnderline = styledFont(font, {FontStyle.underline})
-  let fontStrike = styledFont(font, {FontStyle.strikethrough})
+  var fontBold = styledFont(font, {FontStyle.bold})
+  var fontItalic = styledFont(font, {FontStyle.italics})
+  var fontUnderline = styledFont(font, {FontStyle.underline})
+  var fontStrike = styledFont(font, {FontStyle.strikethrough})
   setWindowTitle("uirelays terminal demo")
+
+  proc reopenFonts() =
+    ## After a zoom the font has to be opened at the new unit height.
+    closeFont(font)
+    font = openFont("", 1, fm)
+    fontBold = styledFont(font, {FontStyle.bold})
+    fontItalic = styledFont(font, {FontStyle.italics})
+    fontUnderline = styledFont(font, {FontStyle.underline})
+    fontStrike = styledFont(font, {FontStyle.strikethrough})
+
+  proc zoom(delta: int) =
+    ## Zoom changes the cell size. A terminal cell is fixed by the terminal, so
+    ## this only does something on a GUI: the window keeps its size and the app
+    ## simply shows fewer, larger cells (or more, smaller ones).
+    when not defined(terminal):
+      cellW = max(4, min(28, cellW + delta))
+      cellH = max(8, min(56, cellH + 2 * delta))
+      setUnitSize(cellW, cellH)
+      reopenFonts()
+      let l = getWindowLayout()
+      width = l.width
+      height = l.height
+    else:
+      discard delta
 
   let palette = [
     color(137, 180, 250),   # blue
@@ -336,6 +377,18 @@ proc main =
             addLog(log, "Key " & keyLabel(e))
         of KeyI:
           imageMode = not imageMode
+        of KeyPlus, KeyEqual:
+          if CtrlPressed in e.mods:
+            zoom(1)
+            addLog(log, "Zoom " & $cellW & "x" & $cellH)
+          else:
+            addLog(log, "Key " & keyLabel(e))
+        of KeyMinus:
+          if CtrlPressed in e.mods:
+            zoom(-1)
+            addLog(log, "Zoom " & $cellW & "x" & $cellH)
+          else:
+            addLog(log, "Key " & keyLabel(e))
         else:
           addLog(log, "Key " & keyLabel(e))
       of TextInputEvent:

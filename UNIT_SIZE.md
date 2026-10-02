@@ -32,7 +32,7 @@ Everything geometric, applied in the `screen`/`input` wrappers:
 |---|---|
 | `createWindow(w, h)` | request scaled by `(unitW, unitH)` |
 | `getWindowLayout()` | width/height returned in app units |
-| `fillRect`, `drawLine`, `drawPoint`, `drawFrame` | coordinates/rect scaled |
+| `fillRect`, `drawLine`, `drawPoint`, `drawFrame` | coordinates/rect scaled; `drawPoint`/`drawLine` are **one unit thick** |
 | `drawText` | `x`, `y` scaled; `known` extent scaled to driver coords |
 | `openFont` | `size` scaled by `unitH` |
 | `getFontMetrics`, `fontLineSkip`, `measureText` | returned in app units |
@@ -40,7 +40,6 @@ Everything geometric, applied in the `screen`/`input` wrappers:
 | `pollEvent`, `waitEvent` | mouse position and window size unscaled back to app units |
 
 ## What does **not** scale
-
 - **Image pixels.** `blitRGBA`/`drawImage` scale `dst` (placement), but the
   pixel buffer's `w`/`h` are left alone: a bitmap has its own resolution, and
   the relay contract promises no scaling. Size the buffer with `deviceRect(r)`
@@ -82,6 +81,13 @@ backend density into the factor (`s = unitSize * uiScale/100`), which also
 scales the window request; that needs the display scale *before* the window
 exists, so it is left out of this prototype.
 
+**Zoom** (the examples bind Ctrl+plus / Ctrl+minus) changes the unit at run
+time: the window keeps its size and the app just gets fewer, larger cells (or
+more, smaller ones). Because `drawPoint`/`drawLine` are unit-thick, the spectrum
+and the polyline grow with it. If the *window* itself is too small, zoom cannot
+help — that needs the window to be re-created at the new unit (`createWindow`
+scales the request) or the backend density folded in, as above.
+
 Do **not** combine `setUnitSize` with `layout.scaled(...)`: `scaled` is the
 app-side DPI knob, and the wrappers already applied `unitSize` to the font size.
 
@@ -101,6 +107,11 @@ let layout = createWindow(80, 24)     # in cells, always
 
 Compile it either way — `nim c -d:terminal examples/terminal_first.nim` or
 `nim c examples/terminal_first.nim` — and the layout code is unchanged.
+
+`examples/terminal_demo.nim` does the same, and both bind **Ctrl+plus /
+Ctrl+minus** to a runtime zoom for the GUI: it changes the cell size, reopens
+the font at the new unit height, and re-reads the window size (which is now
+fewer, larger cells). On the terminal the keys are a no-op — a cell is fixed.
 
 ## Caveats
 
