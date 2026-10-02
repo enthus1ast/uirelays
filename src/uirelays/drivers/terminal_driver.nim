@@ -80,6 +80,12 @@ const
   DrainMax = 16 * 1024          ## bytes drained from the terminal in one poll
   MaxChangedFrame = 256 * 1024  ## per-frame output cap (focim's MaxPerFrame)
 
+type
+  TermColors* = enum
+    ## How many colours the terminal can show. `tc16` is the safe default,
+    ## `tc256` the xterm 256-colour palette, `tc24` direct RGB (truecolor).
+    tc16, tc256, tc24
+
 # Surface state. All of it is reset by `createWindow`.
 var
   cols, rows*: int
@@ -87,7 +93,7 @@ var
   clip*: Rect = Rect(x: 0, y: 0, w: 0, h: 0)
   clipStack: seq[Rect]
   gFirstFrame = true
-  g256 = false
+  gColors: TermColors = tc16
   tty = false                   ## attached to a real terminal
   captured*: string             ## offscreen: every emitted byte, for tests
   gWinch = false                ## SIGWINCH fired; a resize is pending
@@ -120,8 +126,9 @@ proc zeroTimeval(): Timeval =
   Timeval(tv_sec: posix.Time(0), tv_usec: posix.Suseconds(0))
 
 # ---------------------------------------------------------------------------
-# Colour (Step 1) -- ported verbatim from focim/src/focim/ansi.nim, which is
-# exactly the 24-bit / 256-colour -> 16-colour reduction this needs.
+# Colour (Step 1). The requested RGB is kept in the cell and reduced to the
+# best the terminal can show at emit time: truecolor, the xterm 256 palette,
+# or the sixteen ANSI colours.
 # ---------------------------------------------------------------------------
 
 const
@@ -155,25 +162,77 @@ proc cubeColor*(idx: int): int =
     let v = 8 + 10 * (idx - 232)
     nearest(v, v, v)
 
+const CubeLevels: array[6, int] = [0, 95, 135, 175, 215, 255]
+
+proc cubeIndex(v: int): int =
+  ## The 0..5 cube level closest to `v`.
+  result = 0
+  var best = high(int)
+  for i in 0 ..< 6:
+    let d = abs(v - CubeLevels[i])
+    if d < best:
+      best = d
+      result = i
+
+proc nearest256(r, g, b: int): int =
+  ## Index in the xterm 256-colour palette closest to (r, g, b): the sixteen
+  ## system colours, the 6x6x6 cube, or the 24-step grey ramp -- whichever is
+  ## nearest by squared RGB distance.
+  var best = 0
+  var bestD = high(int)
+  for i in 0 ..< 16:
+    let dr = r - Xterm[i].r
+    let dg = g - Xterm[i].g
+    let db = b - Xterm[i].b
+    let d = dr*dr + dg*dg + db*db
+    if d < bestD:
+      bestD = d
+      best = i
+  ## The cube is a product of the three level sets, so the nearest level per
+  ## channel is the nearest cube colour.
+  let ri = cubeIndex(r)
+  let gi = cubeIndex(g)
+  let bi = cubeIndex(b)
+  block:
+    let dr = r - CubeLevels[ri]
+    let dg = g - CubeLevels[gi]
+    let db = b - CubeLevels[bi]
+    let d = dr*dr + dg*dg + db*db
+    if d < bestD:
+      bestD = d
+      best = 16 + 36 * ri + 6 * gi + bi
+  ## The grey ramp 232..255 is finer than the cube's greys.
+  for i in 0 ..< 24:
+    let v = 8 + 10 * i
+    let d = (r - v)*(r - v) + (g - v)*(g - v) + (b - v)*(b - v)
+    if d < bestD:
+      bestD = d
+      best = 232 + i
+  best
+
 proc termColor*(c: Color; bg: bool = false): string =
-  ## The SGR parameter string to paint colour `c` (background when `bg`):
-  ## `38;5;n` / `48;5;n` when the terminal advertises 256 colours, otherwise
-  ## the plain `30 + i` / `90 + i` of the nearest of the sixteen. This is the
-  ## one public colour entry point; everything inside the driver builds on it.
+  ## The SGR parameter string to paint `c` (background when `bg`), reduced to
+  ## what the terminal can show:
+  ##   * truecolor -> `38;2;r;g;b` / `48;2;r;g;b`
+  ##   * 256       -> `38;5;n` / `48;5;n`, nearest of the xterm 256 palette
+  ##   * 16        -> `30+i`/`90+i` (fg), `40+i`/`100+i` (bg), nearest of 16
+  ## This is the one public colour entry point; everything inside builds on it.
   ##
   ## Alpha is not representable in a cell attribute: `drawText`/`fillRect`
   ## composite against their own background before they get here, so by the
   ## time a colour reaches `termColor` it is already opaque.
-  let idx = nearest(int(c.r), int(c.g), int(c.b))
-  if g256:
-    (if bg: "48;5;" else: "38;5;") & $idx
-  else:
+  case gColors
+  of tc24:
+    (if bg: "48;2;" else: "38;2;") & $c.r & ";" & $c.g & ";" & $c.b
+  of tc256:
+    (if bg: "48;5;" else: "38;5;") & $nearest256(int(c.r), int(c.g), int(c.b))
+  of tc16:
+    let idx = nearest(int(c.r), int(c.g), int(c.b))
     let base = (if bg: 40'u8 else: 30'u8)
     if idx < 8:
       $(base + uint8(idx))          # 30-37 / 40-47
     else:
-      $(base + 52'u8 + uint8(idx))  # 90-97 / 100-107, not the 46-53/56-63
-                                    # the old `30+8+idx` produced
+      $(base + 52'u8 + uint8(idx))  # 90-97 / 100-107
 
 proc over*(c: Color): Color =
   ## Composite a colour over itself, dropping its alpha. A solid fill asks for
@@ -458,6 +517,24 @@ proc resizeSurface(nr, nc: int) =
     buf[i] = makeCell(' ', Color(r: 0, g: 0, b: 0, a: 255'u8),
                            Color(r: 0, g: 0, b: 0, a: 255'u8))
 
+proc detectColors(): TermColors =
+  ## Which colour depth to use. `UIRELAYS_TERMINAL_COLORS` overrides everything
+  ## (16 / 256 / 24), then `COLORTERM` marks truecolor, then a `TERM` ending in
+  ## `-direct`, then the `256color` suffix. Terminals that can do truecolor but
+  ## do not advertise it stay on 256, which is safe.
+  let forced = getEnv("UIRELAYS_TERMINAL_COLORS", "").toLowerAscii
+  case forced
+  of "16", "8": return tc16
+  of "256": return tc256
+  of "24", "24bit", "truecolor": return tc24
+  else: discard
+  let ct = getEnv("COLORTERM", "").toLowerAscii
+  if ct.contains("truecolor") or ct.contains("24bit"): return tc24
+  let term = getEnv("TERM", "").toLowerAscii
+  if term.contains("direct"): return tc24
+  if term.contains("256color"): return tc256
+  tc16
+
 proc enterTerminal()   ## forward decl: installed with the terminal, below
 proc createWindow*(layout: var ScreenLayout;
                    icon: pointer; iconLen: int) =
@@ -476,7 +553,7 @@ proc createWindow*(layout: var ScreenLayout;
   let forceOffscreen =
     getEnv("UIRELAYS_TERMINAL_OFFSCREEN", "0").toLowerAscii.contains("1")
   tty = not forceOffscreen and isatty(STDIN_FILENO) > 0 and isatty(1) > 0
-  g256 = getEnv("TERM", "").toLowerAscii.contains("256color")
+  gColors = detectColors()
   if tty:
     let (nr, nc) = queryWinsize()
     resizeSurface(nr, nc)

@@ -23,6 +23,7 @@ from uirelays/drivers/terminal_driver import
 ## shell might).
 putEnv("UIRELAYS_TERMINAL_OFFSCREEN", "1")
 putEnv("TERM", "xterm")                    # not 256color => 16-colour path
+putEnv("UIRELAYS_TERMINAL_COLORS", "16")   # deterministic vs. ambient COLORTERM
 
 var failures = 0
 proc check(name: string; cond: bool) =
@@ -147,6 +148,34 @@ proc renderTests =
   check("drawLine paints a 4-cell diagonal", captured.count("H") == 4)
   check("drawLine uses the line colour", captured.contains("\e[31m"))
   closeFont(font)
+
+# ---------------------------------------------------------------------------
+# Colour-depth reduction: 16 / 256 / truecolor.
+# ---------------------------------------------------------------------------
+proc colorModeTests =
+  echo "colour reduction:"
+  ## The other colour tests force 16; here the override is moved through the
+  ## other depths and `createWindow` re-reads it.
+  putEnv("UIRELAYS_TERMINAL_COLORS", "256")
+  discard createWindow(40, 10)
+  check("256: red is the system red (index 1)",
+    termColor(color(205, 0, 0), false) == "38;5;1")
+  check("256: red background", termColor(color(205, 0, 0), true) == "48;5;1")
+  check("256: an exact cube colour keeps its cube index",
+    termColor(color(95, 135, 175), false) == "38;5;67")
+  check("256: a mid grey uses the grey ramp",
+    termColor(color(128, 128, 128), false) == "38;5;244")
+  check("256: orange uses the colour cube (208)",
+    termColor(color(255, 128, 0), false) == "38;5;208")
+  putEnv("UIRELAYS_TERMINAL_COLORS", "24")
+  discard createWindow(40, 10)
+  check("24: exact truecolor",
+    termColor(color(12, 34, 56), false) == "38;2;12;34;56")
+  check("24: exact truecolor background",
+    termColor(color(12, 34, 56), true) == "48;2;12;34;56")
+  putEnv("UIRELAYS_TERMINAL_COLORS", "16")
+  discard createWindow(40, 10)
+  check("16: red is SGR 31", termColor(color(205, 0, 0), false) == "31")
 
 # ---------------------------------------------------------------------------
 # Input (PLAN: push synthetic byte strings in, check the events out).
@@ -496,6 +525,7 @@ proc main() =
   colourTests()
   utf8Tests()
   renderTests()
+  colorModeTests()
   inputTests()
   unicodeTests()
   keyModTests()

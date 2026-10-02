@@ -15,7 +15,9 @@
 ## Controls:
 ##   mouse      move the pointer, click a button, scroll the wheel
 ##   left click on empty space
-##              drop a point; consecutive points are joined with `drawLine`
+##              drop a point; consecutive points are joined with `drawLine`,
+##              each segment a different colour (row 1 is a hue spectrum, row 5
+##              a black-to-white ramp -- both show how deep the terminal is)
 ##   1-4        activate the matching button from the keyboard
 ##   c          clear the event log and the drawn line
 ##   Esc/Ctrl+Q quit
@@ -35,6 +37,24 @@ type
 proc centered(r: Rect; label: string): tuple[x, y: int] =
   ## Where a one-row label sits so it looks centred in the rectangle.
   (r.x + max(0, (r.w - label.len) div 2), r.y + r.h div 2)
+
+proc hueColor(h: float; s = 1.0; v = 1.0): Color =
+  ## HSV -> RGB, `h` in [0, 1). Small and dependency-free, used for the spectrum
+  ## strips and the rainbow polyline.
+  let sector = int(h * 6.0)
+  let f = h * 6.0 - float(sector)
+  let p = v * (1.0 - s)
+  let q = v * (1.0 - f * s)
+  let t = v * (1.0 - (1.0 - f) * s)
+  var r, g, b: float
+  case sector mod 6
+  of 0: r = v; g = t; b = p
+  of 1: r = q; g = v; b = p
+  of 2: r = p; g = v; b = t
+  of 3: r = p; g = q; b = v
+  of 4: r = t; g = p; b = v
+  else: r = v; g = p; b = q
+  color(uint8(r * 255.0 + 0.5), uint8(g * 255.0 + 0.5), uint8(b * 255.0 + 0.5))
 
 proc keyLabel(e: Event): string =
   ## `KeyPageUp` -> `PageUp`, prefixed with the modifiers that came with it:
@@ -232,6 +252,18 @@ proc main =
       discard drawText(font, width - themeTag.len - 1, 0, themeTag,
                        palette[theme], panel)
 
+    # --- colour spectrum --------------------------------------------------
+    # Row 1 sweeps the hue, row 5 goes from black to white. On a 16-colour
+    # terminal both band visibly, on 256 less, on truecolor not at all -- the
+    # clearest way to see how deep the terminal really is.
+    if width > 1:
+      let last = float(width - 1)
+      for x in 0 ..< width:
+        let t = float(x) / last
+        fillRect(rect(x, 1, 1, 1), hueColor(t))
+        let g = uint8(t * 255.0 + 0.5)
+        fillRect(rect(x, 5, 1, 1), color(g, g, g))
+
     # buttons
     for i in 0 ..< ButtonCount:
       let b = buttons[i]
@@ -293,8 +325,11 @@ proc main =
     # before the pointer so the pointer stays on top.
     if polyline.len > 0:
       for i in 1 ..< polyline.len:
+        ## Each segment gets its own hue, so the drawing shows colour with the
+        ## same reduction the terminal really has.
+        let h = float(i - 1) / float(max(1, polyline.len - 1))
         drawLine(polyline[i - 1].x, polyline[i - 1].y,
-                 polyline[i].x, polyline[i].y, palette[theme])
+                 polyline[i].x, polyline[i].y, hueColor(h))
       for p in polyline:
         fillRect(rect(p.x, p.y, 1, 1), fg)
       if mouseSeen:

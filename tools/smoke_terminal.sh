@@ -56,6 +56,16 @@ echo "smoke: terminal_demo"
   --expect-raw='\e]52;c;' \
   --expect-exit
 
+echo "smoke: terminal_demo colours"
+.build/pty_smoke .build/terminal_demo --wait=1.0 --send='800:\x03' \
+  --expect-raw='\e[38;5;' --expect-raw='\e[48;5;' \
+  --expect-exit
+
+echo "smoke: terminal_demo truecolor"
+COLORTERM=truecolor .build/pty_smoke .build/terminal_demo --wait=1.0 --send='800:\x03' \
+  --expect-raw='\e[38;2;' --expect-raw='\e[48;2;' \
+  --expect-exit
+
 echo "smoke: terminal_demo keys"
 .build/pty_smoke .build/terminal_demo --wait=1.8 \
   --send='200:\e[2~' \
