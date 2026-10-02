@@ -199,6 +199,80 @@ proc firstEvent(s: string): Event =
   feedStr(s)
   discard pollEvent(result)
 
+proc keyEvent(s: string): Event =
+  ## One F-key/arrow press, with the paired KeyUp drained so the next case
+  ## starts clean.
+  result = firstEvent(s)
+  if result.kind == KeyDownEvent:
+    var up: Event
+    discard pollEvent(up)
+
+proc functionKeyTests =
+  echo "function keys:"
+  var e: Event
+
+  ## ctlseqs.ms "PC-Style Function Keys": F1-F4 are SS3 (or CSI with a
+  ## modifier), F5=15~, F6=17~, F7=18~, ..., F10=21~, F11=23~, F12=24~.
+  e = keyEvent("\eOP")
+  check("ESC O P -> F1", e.kind == KeyDownEvent and e.key == KeyF1)
+  e = keyEvent("\e[15~")
+  check("CSI 15~ -> F5", e.kind == KeyDownEvent and e.key == KeyF5)
+  e = keyEvent("\e[16~")
+  check("CSI 16~ is unassigned (no event)", e.kind == NoEvent)
+  e = keyEvent("\e[17~")
+  check("CSI 17~ -> F6", e.kind == KeyDownEvent and e.key == KeyF6)
+  e = keyEvent("\e[18~")
+  check("CSI 18~ -> F7", e.kind == KeyDownEvent and e.key == KeyF7)
+  e = keyEvent("\e[21~")
+  check("CSI 21~ -> F10", e.kind == KeyDownEvent and e.key == KeyF10)
+  e = keyEvent("\e[23~")
+  check("CSI 23~ -> F11", e.kind == KeyDownEvent and e.key == KeyF11)
+  e = keyEvent("\e[24~")
+  check("CSI 24~ -> F12", e.kind == KeyDownEvent and e.key == KeyF12)
+  e = keyEvent("\e[1;2P")
+  check("CSI 1;2P -> Shift+F1",
+    e.kind == KeyDownEvent and e.key == KeyF1 and ShiftPressed in e.mods)
+
+proc editKeyTests =
+  echo "editing keys:"
+  var e: Event
+  e = keyEvent("\e[1~")
+  check("CSI 1~ -> Home", e.kind == KeyDownEvent and e.key == KeyHome)
+  e = keyEvent("\e[H")
+  check("CSI H -> Home", e.kind == KeyDownEvent and e.key == KeyHome)
+  e = keyEvent("\eOH")
+  check("SS3 H -> Home", e.kind == KeyDownEvent and e.key == KeyHome)
+  e = keyEvent("\e[4~")
+  check("CSI 4~ -> End", e.kind == KeyDownEvent and e.key == KeyEnd)
+  e = keyEvent("\e[8~")
+  check("CSI 8~ -> End", e.kind == KeyDownEvent and e.key == KeyEnd)
+  e = keyEvent("\e[F")
+  check("CSI F -> End (PC-style)", e.kind == KeyDownEvent and e.key == KeyEnd)
+  e = keyEvent("\eOF")
+  check("SS3 F -> End", e.kind == KeyDownEvent and e.key == KeyEnd)
+  e = keyEvent("\e[2~")
+  check("CSI 2~ -> Insert", e.kind == KeyDownEvent and e.key == KeyInsert)
+  e = keyEvent("\e[3~")
+  check("CSI 3~ -> Delete", e.kind == KeyDownEvent and e.key == KeyDelete)
+  e = keyEvent("\e[5~")
+  check("CSI 5~ -> PageUp", e.kind == KeyDownEvent and e.key == KeyPageUp)
+  e = keyEvent("\e[6~")
+  check("CSI 6~ -> PageDown", e.kind == KeyDownEvent and e.key == KeyPageDown)
+  e = keyEvent("\e[3;5~")
+  check("CSI 3;5~ -> Ctrl+Delete",
+    e.kind == KeyDownEvent and e.key == KeyDelete and CtrlPressed in e.mods)
+  e = keyEvent("\e[1;5F")
+  check("CSI 1;5F -> Ctrl+End",
+    e.kind == KeyDownEvent and e.key == KeyEnd and CtrlPressed in e.mods)
+
+  ## Several sequences back to back in one read must all come through.
+  feedStr("\e[2~\e[3~\e[4~\e[F")
+  var got: seq[KeyCode] = @[]
+  while pollEvent(e):
+    if e.kind == KeyDownEvent: got.add e.key
+  check("back-to-back editing keys keep their order",
+    got == @[KeyInsert, KeyDelete, KeyEnd, KeyEnd])
+
 proc clickTests =
   echo "click counts:"
   var e: Event
@@ -425,6 +499,8 @@ proc main() =
   inputTests()
   unicodeTests()
   keyModTests()
+  functionKeyTests()
+  editKeyTests()
   relayTests()
   clickTests()
   mouseTests()

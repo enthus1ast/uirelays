@@ -798,10 +798,27 @@ proc emitCSI(seq: openArray[uint8]) =
   of ord('D'): emitKeyPair(KeyLeft, mods)
   of ord('H'), ord('f'):
     if p0 in {0, 1}: emitKeyPair(KeyHome, mods)
+  of ord('F'):
+    ## PC-style End in normal cursor mode; application mode sends SS3 F (handled
+    ## in `emitSS3`). F5-F12 and the VT220 editing keys use the `~` forms below.
+    if p0 in {0, 1}: emitKeyPair(KeyEnd, mods)
   of ord('Z'):
     ## Shift+Tab is its own sequence, with no parameter to carry the modifier.
     emitKeyPair(KeyTab, {ShiftPressed})
+  of ord('P'), ord('Q'), ord('R'), ord('S'):
+    ## F1-F4 with a modifier: xterm switches the SS3 prefix to CSI when the
+    ## sequence carries a modifier parameter (`CSI 1;mod P..S`). The bare
+    ## `CSI P..S` form is accepted too for terminals that use it unmodified.
+    if p0 in {0, 1}:
+      case final
+      of ord('P'): emitKeyPair(KeyF1, mods)
+      of ord('Q'): emitKeyPair(KeyF2, mods)
+      of ord('R'): emitKeyPair(KeyF3, mods)
+      else: emitKeyPair(KeyF4, mods)
   of ord('~'):
+    ## ctlseqs.ms, "PC-Style Function Keys": F5=15~, then 17~..21~ for
+    ## F6..F10 and 23~, 24~ for F11, F12. 16 and 22 are unassigned, so the old
+    ## 16..22 run shifted every key from F6 on by one.
     case p0
     of 1, 7: emitKeyPair(KeyHome, mods)
     of 2: emitKeyPair(KeyInsert, mods)
@@ -814,13 +831,13 @@ proc emitCSI(seq: openArray[uint8]) =
     of 13: emitKeyPair(KeyF3, mods)
     of 14: emitKeyPair(KeyF4, mods)
     of 15: emitKeyPair(KeyF5, mods)
-    of 16: emitKeyPair(KeyF6, mods)
-    of 17: emitKeyPair(KeyF7, mods)
-    of 18: emitKeyPair(KeyF8, mods)
-    of 19: emitKeyPair(KeyF9, mods)
-    of 20: emitKeyPair(KeyF10, mods)
-    of 21: emitKeyPair(KeyF11, mods)
-    of 22: emitKeyPair(KeyF12, mods)
+    of 17: emitKeyPair(KeyF6, mods)
+    of 18: emitKeyPair(KeyF7, mods)
+    of 19: emitKeyPair(KeyF8, mods)
+    of 20: emitKeyPair(KeyF9, mods)
+    of 21: emitKeyPair(KeyF10, mods)
+    of 23: emitKeyPair(KeyF11, mods)
+    of 24: emitKeyPair(KeyF12, mods)
     else: discard
   of ord('I'):
     ## Focus in/out, when mode 1004 is enabled. They carry no payload. A
@@ -834,7 +851,7 @@ proc emitCSI(seq: openArray[uint8]) =
     if gFocus != 0'i8:
       gFocus = 0'i8
       eventQueue.add Event(kind: WindowFocusLostEvent)
-  of ord('m'), ord('d'), ord('S'), ord('T'):
+  of ord('m'), ord('d'), ord('T'):
     ## SGR attributes, cursor-position, page-scroll: nothing to report.
     discard
   else:
