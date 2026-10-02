@@ -406,7 +406,13 @@ proc createWindow*(layout: var ScreenLayout;
   discard iconLen
   let reqW = layout.width
   let reqH = layout.height
-  tty = isatty(STDIN_FILENO) > 0 and isatty(1) > 0
+  ## Real mode needs a real terminal on both ends. Tests run with no TTY, and a
+  ## `-d:terminal` app can force offscreen with `UIRELAYS_TERMINAL_OFFSCREEN=1`
+  ## so a captured run never puts a terminal into raw mode; otherwise fall back
+  ## to offscreen the moment either fd is not a terminal.
+  let forceOffscreen =
+    getEnv("UIRELAYS_TERMINAL_OFFSCREEN", "0").toLowerAscii.contains("1")
+  tty = not forceOffscreen and isatty(STDIN_FILENO) > 0 and isatty(1) > 0
   g256 = getEnv("TERM", "").toLowerAscii.contains("256color")
   if tty:
     let (nr, nc) = queryWinsize()
@@ -891,11 +897,12 @@ proc enterTerminal() =
   installSignals()
   nonblock(true)
   stdout.write "\e[?1049h"   # alternate screen buffer
+  stdout.write "\e[?1003h"   # (Aktiviert Klicks UND alle Mausbewegungen / Mouse Tracking)
   stdout.write "\e[?1006h"   # SGR mouse
   stdout.flushFile()
   hideCursor()
 proc leaveTerminal() =
-  stdout.write "\e[?1006l\e[?1049l\e[0m"
+  stdout.write "\e[?1003l\e[?1006l\e[?1049l\e[0m" # TODO auf mehrere zeilen aufteilen zum besseren lesen
   stdout.flushFile()
   showCursor()
   nonblock(false)
