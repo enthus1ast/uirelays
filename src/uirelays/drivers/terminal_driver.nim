@@ -508,7 +508,10 @@ proc refresh*() =
   if tty:
     outSink("\e[?25h")          # restore the cursor after the frame
   lastBuf = buf
-  captured.setLen 0
+  ## NB: `captured` is NOT reset here. On a real TTY `outSink`/`emit` writes to
+  ## stdout and `captured` stays empty; offscreen (tests) it is what the whole
+  ## session emitted, so clearing it here would throw away the capture. It is
+  ## reset once, in `initTerminalDriver`, at the start of a run.
 
 # ---------------------------------------------------------------------------
 # Input (Step 5) -- the unified state machine, then the relays that feed it.
