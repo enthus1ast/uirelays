@@ -11,13 +11,15 @@ type
   Image* = distinct int   ## opaque handle; 0 = invalid
 
   FontStyle* {.pure.} = enum
-    bold, italics
+    bold, italics, underline, strikethrough
   FontStyles* = set[FontStyle]
-    ## What a font is asked to look like beyond its size. `{}` is the upright
-    ## regular face every driver can produce; the rest are a wish. A family
-    ## without a bold or an italic face -- and a driver that cannot ask for one
-    ## -- draws the regular face instead, so styled text is at worst plain,
-    ## never missing.
+    ## Text-style hints asked of a font, beyond its size. `bold` and `italics`
+    ## are faces (a different cut, or one the driver synthesises); `underline`
+    ## and `strikethrough` are decorations a driver applies while drawing. They
+    ## are carried on the font handle so `drawText` needs no style parameter,
+    ## and every one is a wish: a driver that cannot produce it draws the plain
+    ## face/run instead, so styled text is at worst unstyled, never missing.
+    ## `{}` is the upright regular face every driver can produce.
 
   TextExtent* = object
     w*, h*: int
@@ -193,16 +195,22 @@ proc createWindow*(requestedW, requestedH: int; fullScreen = false;
   ## matching it is the other way an icon reaches the taskbar -- through the
   ## entry's `Icon=` and the icon theme. `icon` is for the window itself, and
   ## for the desktops and the moments where no entry is installed to look up.
-  result = ScreenLayout(width: requestedW, height: requestedH,
+  result = ScreenLayout(width: requestedW * unitW, height: requestedH * unitH,
                         scaleX: 1, scaleY: 1, uiScale: 100,
                         fullScreen: fullScreen)
   windowRelays.createWindow(result,
     if icon.len > 0: cast[pointer](unsafeAddr icon[0]) else: nil, icon.len)
+  ## The driver fills the layout in driver coordinates; the app sees units.
+  result.width = toUnitX(result.width)
+  result.height = toUnitY(result.height)
 
 proc getWindowLayout*(): ScreenLayout =
-  ## The current size and scale. Worth re-reading after the window moved to
-  ## another monitor; `WindowMetricsEvent` reports the same numbers.
-  windowRelays.getWindowLayout()
+  ## The current size and scale, in application units. Worth re-reading after
+  ## the window moved to another monitor; `WindowMetricsEvent` reports the same
+  ## numbers.
+  result = windowRelays.getWindowLayout()
+  result.width = toUnitX(result.width)
+  result.height = toUnitY(result.height)
 
 proc scaled*(layout: ScreenLayout; value: int): int =
   ## Enlarge a hardcoded font size or pixel dimension for this display.
@@ -212,7 +220,7 @@ proc scaled*(layout: ScreenLayout; value: int): int =
 proc refresh*() = windowRelays.refresh()
 proc saveState*() = windowRelays.saveState()
 proc restoreState*() = windowRelays.restoreState()
-proc setClipRect*(r: Rect) = windowRelays.setClipRect(r)
+proc setClipRect*(r: Rect) = windowRelays.setClipRect(r.scaled)
 proc setCursor*(c: CursorKind) = windowRelays.setCursor(c)
 proc setWindowTitle*(title: string) = windowRelays.setWindowTitle(title)
 
@@ -223,23 +231,27 @@ type
     base: Font
     path: string
     size: int
-    variants: array[3, Font]  ## {bold}, {italics}, {bold, italics}
+    variants: array[16, Font]  ## one per combination of the four style bits
 
 var openedFonts: seq[StyledSlot]
   ## Only the upright fonts an app opened itself; the variants hang off them
   ## and are closed with them, so an app never has to know they exist.
 
 proc variantIndex(style: FontStyles): int {.inline.} =
-  ## `{bold}` -> 0, `{italics}` -> 1, `{bold, italics}` -> 2.
-  result = (if FontStyle.bold in style: 1 else: 0) +
-           (if FontStyle.italics in style: 2 else: 0) - 1
+  ## One bit per style, so the four styles give sixteen cache slots.
+  if FontStyle.bold in style: result = result or 1
+  if FontStyle.italics in style: result = result or 2
+  if FontStyle.underline in style: result = result or 4
+  if FontStyle.strikethrough in style: result = result or 8
 
 proc openFont*(path: string; size: int; metrics: var FontMetrics;
                style: FontStyles = {}): Font =
   ## `path` is a font file, or "" for the platform's monospaced default.
-  ## A styled font asked for here is opened outright; `styledFont` is the way
-  ## to get one from a font that is already open.
-  result = fontRelays.openFont(path, size, style, metrics)
+  ## `size` is in application units; `metrics` comes back in the same.
+  result = fontRelays.openFont(path, size * unitH, style, metrics)
+  metrics.ascent = toUnitY(metrics.ascent)
+  metrics.descent = toUnitY(metrics.descent)
+  metrics.lineHeight = toUnitY(metrics.lineHeight)
   if result.int != 0 and style == {}:
     openedFonts.add StyledSlot(base: result, path: path, size: size)
 
@@ -257,7 +269,8 @@ proc styledFont*(f: Font; style: FontStyles): Font =
     if openedFonts[i].base == f:
       if openedFonts[i].variants[k].int == 0:
         var metrics = FontMetrics()
-        let v = fontRelays.openFont(openedFonts[i].path, openedFonts[i].size,
+        let v = fontRelays.openFont(openedFonts[i].path,
+                                    openedFonts[i].size * unitH,
                                     style, metrics)
         # A failure is remembered as `f`, or every frame would try again.
         openedFonts[i].variants[k] = (if v.int == 0: f else: v)
@@ -274,10 +287,18 @@ proc closeFont*(f: Font) =
       break
   fontRelays.closeFont(f)
 
-proc getFontMetrics*(f: Font): FontMetrics = fontRelays.getFontMetrics(f)
-proc fontLineSkip*(f: Font): int = fontRelays.getFontMetrics(f).lineHeight
+proc getFontMetrics*(f: Font): FontMetrics =
+  result = fontRelays.getFontMetrics(f)
+  result.ascent = toUnitY(result.ascent)
+  result.descent = toUnitY(result.descent)
+  result.lineHeight = toUnitY(result.lineHeight)
+proc fontLineSkip*(f: Font): int =
+  toUnitY(fontRelays.getFontMetrics(f).lineHeight)
 proc measureText*(f: Font; text: string): TextExtent =
-  fontRelays.measureText(f, text)
+  ## The extent in application units (a driver returns driver coordinates).
+  result = fontRelays.measureText(f, text)
+  result.w = toUnitX(result.w)
+  result.h = toUnitY(result.h)
 proc drawText*(f: Font; x, y: int; text: string; fg, bg: Color;
                known = TextExtent()): TextExtent =
   ## `known` is what `measureText` answered for this very text in this very
@@ -288,12 +309,15 @@ proc drawText*(f: Font; x, y: int; text: string; fg, bg: Color;
   ## background on some platforms and nothing at all on others. Pass what
   ## `measureText` said or pass nothing.
   if known.w > 0 and fontRelays.drawMeasuredText != nil:
-    fontRelays.drawMeasuredText(f, x, y, text, fg, bg, known)
+    let scaled = TextExtent(w: known.w * unitW, h: known.h * unitH)
+    fontRelays.drawMeasuredText(f, x * unitW, y * unitH, text, fg, bg, scaled)
     result = known
   else:
-    result = fontRelays.drawText(f, x, y, text, fg, bg)
+    result = fontRelays.drawText(f, x * unitW, y * unitH, text, fg, bg)
+    result.w = toUnitX(result.w)
+    result.h = toUnitY(result.h)
 
-proc fillRect*(r: Rect; color: Color) = drawRelays.fillRect(r, color)
+proc fillRect*(r: Rect; color: Color) = drawRelays.fillRect(r.scaled, color)
 proc drawFrame*(r: Rect; color: Color; width = 1) =
   ## An outline `width` pixels thick, drawn just inside `r`. Four `fillRect`s,
   ## so it needs nothing of a driver that `fillRect` does not already need.
@@ -303,22 +327,65 @@ proc drawFrame*(r: Rect; color: Color; width = 1) =
   fillRect(rect(r.x, r.y + r.h - w, r.w, w), color)
   fillRect(rect(r.x, r.y, w, r.h), color)
   fillRect(rect(r.x + r.w - w, r.y, w, r.h), color)
+proc drawPoint*(x, y: int; color: Color) =
+  ## One application unit. With a unit of one pixel this is the driver's own
+  ## point; otherwise it fills a whole unit, which is what a terminal cell is --
+  ## a driver point is a single pixel and would come out hairline-thin.
+  if unitW == 1 and unitH == 1:
+    drawRelays.drawPoint(x, y, color)
+  else:
+    drawRelays.fillRect(rect(x * unitW, y * unitH, unitW, unitH), color)
 proc drawLine*(x1, y1, x2, y2: int; color: Color) =
-  drawRelays.drawLine(x1, y1, x2, y2, color)
-proc drawPoint*(x, y: int; color: Color) = drawRelays.drawPoint(x, y, color)
-proc loadImage*(path: string): Image = drawRelays.loadImage(path)
-proc freeImage*(img: Image) = drawRelays.freeImage(img)
-proc drawImage*(img: Image; src, dst: Rect) = drawRelays.drawImage(img, src, dst)
+  ## One unit thick. With a unit of one pixel this is the driver's own line;
+  ## otherwise it steps cell by cell -- the way the terminal's line does -- so
+  ## a diagonal is a run of unit blocks and not a one-pixel thread.
+  if unitW == 1 and unitH == 1:
+    drawRelays.drawLine(x1, y1, x2, y2, color)
+    return
+  ## Bresenham in application units.
+  let dx = abs(x2 - x1)
+  let dy = -abs(y2 - y1)
+  var sx = (if x1 < x2: 1 else: -1)
+  var sy = (if y1 < y2: 1 else: -1)
+  var err = dx + dy
+  var cx = x1
+  var cy = y1
+  while true:
+    drawPoint(cx, cy, color)
+    if cx == x2 and cy == y2: break
+    let e2 = err * 2
+    if e2 >= dy:
+      err += dy
+      cx += sx
+    if e2 <= dx:
+      err += dx
+      cy += sy
+proc loadImage*(path: string): Image =
+  ## `Image(0)` from a driver that does not offer images, the same handle it
+  ## gives for a file it could not open.
+  if drawRelays.loadImage != nil: drawRelays.loadImage(path)
+  else: Image(0)
+proc freeImage*(img: Image) =
+  if drawRelays.freeImage != nil: drawRelays.freeImage(img)
+proc drawImage*(img: Image; src, dst: Rect) =
+  ## `src` is in the picture's own pixels; `dst` is in application units.
+  if drawRelays.drawImage != nil: drawRelays.drawImage(img, src, dst.scaled)
 proc imageSize*(img: Image): tuple[w, h: int] =
   ## `(0, 0)` from a driver that does not offer it. See the relay.
   if drawRelays.imageSize != nil: drawRelays.imageSize(img)
   else: (0, 0)
 proc blitRGBA*(pixels: ptr UncheckedArray[uint32]; w, h: int; dst: Rect): bool =
-  ## `false` from a driver that does not offer it, which is the same answer
-  ## it gives for a surface that cannot take the pixels: either way the
-  ## caller draws something else. See the relay.
-  if drawRelays.blitRGBA != nil: drawRelays.blitRGBA(pixels, w, h, dst)
+  ## `false` from a driver that does not offer it. `dst` is in application
+  ## units and gets scaled; `w`/`h` are the pixel buffer's own size and are
+  ## left alone, so the app decides the resolution (see `deviceRect`).
+  if drawRelays.blitRGBA != nil: drawRelays.blitRGBA(pixels, w, h, dst.scaled)
   else: false
+
+proc deviceRect*(r: Rect): Rect =
+  ## The driver-coordinate rectangle an application-unit rectangle covers, at
+  ## the current scale. Size an image's pixel buffer to this (`w`/`h`) so it
+  ## lands crisp instead of being stretched by the driver.
+  r.scaled
 
 # Color constructors
 proc color*(r, g, b: uint8; a: uint8 = 255): Color =

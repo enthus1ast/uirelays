@@ -8,8 +8,15 @@
 ##   -d:sdl3    Force SDL3 backend
 ##   -d:sdl2    Force SDL2 backend
 ##   -d:gtk4    Force GTK4 backend
+##   -d:terminal Force the full-screen terminal backend
 
-when (defined(features.uirelays.figDrawWindy) or defined(figDrawWindy)) and
+## The chain below is a single when/elif/else, so exactly one `initBackend` is
+## ever declared. `-d:terminal` is first and wins over every platform fallback.
+when defined(terminal):
+  import drivers/terminal_driver
+  proc initBackend*() = initTerminalDriver()
+
+elif (defined(features.uirelays.figDrawWindy) or defined(figDrawWindy)) and
     (defined(features.uirelays.figDrawSiwin) or defined(figDrawSiwin)):
   {.error: "figDrawWindy and figDrawSiwin are mutually exclusive".}
 

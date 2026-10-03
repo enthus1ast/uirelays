@@ -1,6 +1,8 @@
 # Platform-independent input events and relays.
 # Part of the core stdlib abstraction.
 
+import coords
+
 type
   KeyCode* = enum
     KeyNone,
@@ -72,11 +74,24 @@ var inputRelays* = InputRelays(
   sleep: proc (ms: int) = discard,
   shutdown: proc () = discard)
 
+proc unscaleEvent(e: var Event) =
+  ## Mouse positions and window sizes arrive in driver coordinates; the app
+  ## works in its own units. Scroll deltas are deltas, not coordinates, so they
+  ## are left alone.
+  case e.kind
+  of MouseDownEvent, MouseUpEvent, MouseMoveEvent,
+     WindowResizeEvent, WindowMetricsEvent:
+    e.x = toUnitX(e.x)
+    e.y = toUnitY(e.y)
+  else: discard
+
 proc pollEvent*(e: var Event; flags: set[InputFlag] = {}): bool =
-  inputRelays.pollEvent(e, flags)
+  result = inputRelays.pollEvent(e, flags)
+  if result: unscaleEvent(e)
 proc waitEvent*(e: var Event; timeoutMs: int = -1;
                 flags: set[InputFlag] = {}): bool =
-  inputRelays.waitEvent(e, timeoutMs, flags)
+  result = inputRelays.waitEvent(e, timeoutMs, flags)
+  if result: unscaleEvent(e)
 proc getClipboardText*(): string = clipboardRelays.getText()
 proc putClipboardText*(text: string) = clipboardRelays.putText(text)
 proc getTicks*(): int = inputRelays.getTicks()

@@ -879,6 +879,9 @@ proc processXEvent(xev: XEvent) =
       # Scroll wheel
       var e = input.Event(kind: MouseWheelEvent)
       e.y = if btn == Button4: 1 else: -1
+      # The modifier state, so that e.g. Ctrl+wheel can mean zoom rather
+      # than scroll. The wheel carries no position; the delta is in `y`.
+      e.mods = translateMods(xev.xbutton.state)
       pushEvent(e)
     else:
       var e = input.Event(kind: MouseDownEvent)
