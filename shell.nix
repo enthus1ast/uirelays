@@ -6,12 +6,12 @@ pkgs.mkShell {
   ];
 
   buildInputs = with pkgs; [
-    libX11
-    libXft
+    libx11
+    libxft
   ];
 
   shellHook = ''
-    export LD_LIBRARY_PATH="${pkgs.libX11}/lib:$LD_LIBRARY_PATH"
+    export LD_LIBRARY_PATH="${pkgs.libx11}/lib:${pkgs.libxft}/lib:$LD_LIBRARY_PATH"
     echo "X11 development environment loaded!"
   '';
 }
